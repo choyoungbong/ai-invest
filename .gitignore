@@ -1,0 +1,13 @@
+﻿.env
+.env.local
+.env.production
+__pycache__/
+*.py[cod]
+*.pyo
+node_modules/
+.next/
+dashboard/node_modules/
+dashboard/.next/
+*.log
+.DS_Store
+Thumbs.db
