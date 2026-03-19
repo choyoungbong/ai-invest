@@ -1,0 +1,89 @@
+version: "3.9"
+
+services:
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: aiinvest-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aiinvest
+      POSTGRES_PASSWORD: aiinvest
+      POSTGRES_DB: aiinvest
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aiinvest"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: aiinvest-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI Backend ─────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aiinvest-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://aiinvest:aiinvest@postgres:5432/aiinvest
+      REDIS_URL: redis://redis:6379/0
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      KIS_APP_KEY: ${KIS_APP_KEY:-}
+      KIS_APP_SECRET: ${KIS_APP_SECRET:-}
+      KIS_ACCOUNT_NO: ${KIS_ACCOUNT_NO:-}
+      KIS_MOCK: ${KIS_MOCK:-true}
+      STOP_LOSS_PCT: ${STOP_LOSS_PCT:--0.02}
+      TARGET_PROFIT_PCT: ${TARGET_PROFIT_PCT:-0.03}
+      TOTAL_BUDGET: ${TOTAL_BUDGET:-5000000}
+      ALLOC_BREAKOUT: ${ALLOC_BREAKOUT:-0.40}
+      ALLOC_MA_CROSS: ${ALLOC_MA_CROSS:-0.30}
+      ALLOC_RSI_REVERSAL: ${ALLOC_RSI_REVERSAL:-0.20}
+      ALLOC_MACD: ${ALLOC_MACD:-0.10}
+      MAX_SINGLE_TRADE_PCT: ${MAX_SINGLE_TRADE_PCT:-0.20}
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Next.js Dashboard ──────────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: aiinvest-dashboard
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://api:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  redis_data:

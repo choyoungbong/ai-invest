@@ -1,0 +1,141 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+
+    // ── 서버 관리 ──────────────────────────────────────────────────────────
+    {
+      "label": "🚀 서버 시작",
+      "type": "shell",
+      "command": "docker compose up -d",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+    {
+      "label": "🔨 서버 재빌드 후 시작",
+      "type": "shell",
+      "command": "docker compose up -d --build",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+    {
+      "label": "⏹ 서버 중지",
+      "type": "shell",
+      "command": "docker compose down",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+    {
+      "label": "🔄 서버 재시작",
+      "type": "shell",
+      "command": "docker compose restart",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+    {
+      "label": "📋 컨테이너 상태 확인",
+      "type": "shell",
+      "command": "docker compose ps",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+    {
+      "label": "📜 서버 로그 보기",
+      "type": "shell",
+      "command": "docker compose logs api -f --tail=50",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+
+    // ── 데이터 수집 ────────────────────────────────────────────────────────
+    {
+      "label": "📥 종목 마스터 동기화",
+      "type": "shell",
+      "command": "Invoke-RestMethod -Uri 'http://localhost:8000/collector/sync-master' -Method POST",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+    {
+      "label": "📊 오늘 시세 수집",
+      "type": "shell",
+      "command": "Invoke-RestMethod -Uri 'http://localhost:8000/collector/collect' -Method POST",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+
+    // ── 전략 실행 ──────────────────────────────────────────────────────────
+    {
+      "label": "🔍 거래대금 스캔",
+      "type": "shell",
+      "command": "Invoke-RestMethod -Uri 'http://localhost:8000/scanner/top-volume?top_n=30'",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+    {
+      "label": "⚡ 전략 실행 (돌파매매)",
+      "type": "shell",
+      "command": "Invoke-RestMethod -Uri 'http://localhost:8000/strategy/run' -Method POST",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+    {
+      "label": "📈 확장 전략 실행 (MA/RSI/MACD)",
+      "type": "shell",
+      "command": "Invoke-RestMethod -Uri 'http://localhost:8000/strategy/extended' -Method POST",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+    {
+      "label": "🟢 신호 목록 조회",
+      "type": "shell",
+      "command": "Invoke-RestMethod -Uri 'http://localhost:8000/signals'",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+
+    // ── KIS API ────────────────────────────────────────────────────────────
+    {
+      "label": "🔌 KIS API 전체 검증",
+      "type": "shell",
+      "command": "docker exec -it aiinvest-api python kis_verify/verify.py",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+    {
+      "label": "💰 계좌 잔고 조회",
+      "type": "shell",
+      "command": "Invoke-RestMethod -Uri 'http://localhost:8000/trade/balance'",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+    {
+      "label": "🛡 손절/익절 체크",
+      "type": "shell",
+      "command": "Invoke-RestMethod -Uri 'http://localhost:8000/trade/auto-stoploss' -Method POST",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+    {
+      "label": "🛒 체결 내역 조회",
+      "type": "shell",
+      "command": "Invoke-RestMethod -Uri 'http://localhost:8000/trades'",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+
+    // ── AI 분석 ────────────────────────────────────────────────────────────
+    {
+      "label": "🤖 AI 일괄 분석",
+      "type": "shell",
+      "command": "Invoke-RestMethod -Uri 'http://localhost:8000/ai/analyze-all' -Method POST",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+
+    // ── 알림 ───────────────────────────────────────────────────────────────
+    {
+      "label": "📱 텔레그램 테스트",
+      "type": "shell",
+      "command": "Invoke-RestMethod -Uri 'http://localhost:8000/notification/test' -Method POST",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+
+    // ── 모니터링 ───────────────────────────────────────────────────────────
+    {
+      "label": "🏥 헬스체크",
+      "type": "shell",
+      "command": "Invoke-RestMethod -Uri 'http://localhost:8000/monitor/health'",
+      "presentation": { "reveal": "always", "panel": "new" }
+    },
+    {
+      "label": "❗ 최근 에러 조회",
+      "type": "shell",
+      "command": "Invoke-RestMethod -Uri 'http://localhost:8000/monitor/errors'",
+      "presentation": { "reveal": "always", "panel": "new" }
+    }
+  ]
+}
