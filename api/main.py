@@ -33,6 +33,7 @@ from strategy.extended import run_extended_strategy
 from api.monitor import ErrorMonitorMiddleware, run_health_check_and_notify, get_recent_errors
 from trader.allocation import get_allocation_summary, calc_quantity_by_budget
 from trader.auto_stoploss import check_and_execute_stop_loss
+from trader.auto_trader import auto_execute_signals
 from kis_verify.router import router as kis_verify_router
 
 logging.basicConfig(
@@ -139,18 +140,24 @@ async def strategy_run(
     candidates = await run_scanner(db, top_n=top_n)
     signals = await run_strategy(db, candidates)
 
-    # 신호 발생 시 AI 분석 + 텔레그램 알림
+    # 신호 발생 시 AI 분석
     if signals:
         await analyze_all_new_signals(db)
 
     # 텔레그램 알림
     await notify_signals_summary(signals)
 
+    # 자동 매수 실행
+    orders = []
+    if signals:
+        orders = await auto_execute_signals(db, signals)
+
     return {
         "message": "전략 실행 완료",
         "candidates": len(candidates),
-        "signals": len(signals),
-        "data": signals,
+        "signals":    len(signals),
+        "orders":     len(orders),
+        "data":       signals,
     }
 
 
