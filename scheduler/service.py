@@ -27,6 +27,7 @@ from strategy.service import run_strategy
 from ai.service import analyze_all_new_signals
 from notification.service import notify_signals_summary, send_message
 from trader.auto_stoploss import check_and_execute_stop_loss
+from trader.auto_trader import auto_execute_signals
 
 logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
@@ -62,7 +63,12 @@ async def job_collect_and_run():
         # 4. 텔레그램 알림
         await notify_signals_summary(signals)
 
-    logger.info(f"[스케줄러] {now} 자동 실행 완료 — 신호 {len(signals)}건")
+        # 5. 자동 매수 실행 ← 핵심 추가
+        orders = []
+        if signals:
+            orders = await auto_execute_signals(db, signals)
+
+    logger.info(f"[스케줄러] {now} 자동 실행 완료 — 신호 {len(signals)}건, 매수 {len(orders)}건")
 
 
 async def job_stop_loss_check():
