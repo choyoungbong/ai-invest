@@ -77,10 +77,12 @@ services:
     build:
       context: ./dashboard
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://34.64.253.182:8000
     container_name: aiinvest-dashboard
     restart: unless-stopped
     environment:
-      NEXT_PUBLIC_API_URL: http://api:8000
+      NEXT_PUBLIC_API_URL: http://34.64.253.182:8000
     ports:
       - "3000:3000"
     depends_on:
