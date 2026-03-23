@@ -162,8 +162,8 @@ async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[di
             f"💰 매수가: {current_price:,}원\n"
             f"🔢 수량: {quantity}주\n"
             f"💵 투자금액: {amount:,}원\n"
-            f"🎯 목표가: {target_price:,}원 (+3%)\n"
-            f"🛑 손절가: {stop_price:,}원 (-2%)\n"
+            f"🎯 목표가: {target_price:,}원 (+{float(os.getenv('TARGET_PROFIT_PCT', '0.03'))*100:.0f}%)\n"
+            f"🛑 손절가: {stop_price:,}원 ({float(os.getenv('STOP_LOSS_PCT', '-0.02'))*100:.0f}%)\n"
             f"{'✅ 주문 성공' if result['success'] else '❌ 주문 실패'}"
         )
 
