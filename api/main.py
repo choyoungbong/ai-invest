@@ -34,6 +34,7 @@ from api.monitor import ErrorMonitorMiddleware, run_health_check_and_notify, get
 from trader.allocation import get_allocation_summary, calc_quantity_by_budget
 from trader.auto_stoploss import check_and_execute_stop_loss
 from trader.auto_trader import auto_execute_signals
+from trader.ws_client import RealTimeMonitor
 from kis_verify.router import router as kis_verify_router
 
 logging.basicConfig(
@@ -43,7 +44,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── 백그라운드 Collector ───────────────────────────────────────────────────────
-collector_service = CollectorService(db_factory=AsyncSessionLocal)
+collector_service   = CollectorService(db_factory=AsyncSessionLocal)
+rt_monitor          = RealTimeMonitor(db_factory=AsyncSessionLocal)
 
 
 @asynccontextmanager
@@ -57,8 +59,14 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info("스케줄러 시작 완료")
 
+    # 실시간 모니터 시작
+    await rt_monitor.start()
+    await rt_monitor.subscribe_holdings()
+    logger.info("실시간 WebSocket 모니터 시작")
+
     yield
 
+    await rt_monitor.stop()
     scheduler.shutdown(wait=False)
     await collector_service.stop()
     logger.info("AI INVEST 서버 종료")
@@ -151,6 +159,11 @@ async def strategy_run(
     orders = []
     if signals:
         orders = await auto_execute_signals(db, signals)
+        # 새로 매수된 종목 WebSocket 구독 추가
+        if orders:
+            from trader.ws_client import update_subscribed_codes, _subscribed_codes
+            new_codes = [o["code"] for o in orders]
+            update_subscribed_codes(list(_subscribed_codes) + new_codes)
 
     return {
         "message": "전략 실행 완료",
