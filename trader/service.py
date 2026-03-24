@@ -134,6 +134,21 @@ async def execute_order(
     )
     await db.commit()
 
+    # 핵심 추가 (여기만 중요)
+    if signal.signal_type == "BUY" and status == "FILLED":
+        try:
+            from realtime.realtime_engine import add_trade
+
+            add_trade({
+                "code": signal.code,
+                "price": live_price
+            })
+
+            logger.info(f"[Realtime 등록] {signal.code} @ {live_price}")
+        except Exception as e:
+            logger.error(f"Realtime 등록 실패: {e}")
+            
+    # ── 응답 데이터 ───────────────────────────────────────────────────────
     trade_data = {
         "trade_id":   trade_id,
         "code":       signal.code,
