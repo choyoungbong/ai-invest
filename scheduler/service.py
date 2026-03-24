@@ -135,7 +135,7 @@ def create_scheduler() -> AsyncIOScheduler:
     # 장중 30분마다 손절 체크
     scheduler.add_job(
         job_stop_loss_check,
-        CronTrigger(hour="9-15", minute="*/30", day_of_week="mon-fri", timezone=KST),
+        CronTrigger(hour="9-15", minute="*/5", day_of_week="mon-fri", timezone=KST),
         id="stop_loss_check", name="손절 체크",
     )
 
