@@ -35,6 +35,8 @@ from trader.allocation import get_allocation_summary, calc_quantity_by_budget
 from trader.auto_stoploss import check_and_execute_stop_loss
 from trader.auto_trader import auto_execute_signals
 from trader.ws_client import RealTimeMonitor
+from report.service import send_daily_report, send_weekly_report, get_monthly_stats
+from strategy.guard import filter_signals, check_and_close_expired_positions
 from kis_verify.router import router as kis_verify_router
 
 logging.basicConfig(
@@ -155,11 +157,11 @@ async def strategy_run(
     # 텔레그램 알림
     await notify_signals_summary(signals)
 
-    # 자동 매수 실행
+    # 자동 매수 실행 (필터 적용)
     orders = []
     if signals:
-        orders = await auto_execute_signals(db, signals)
-        # 새로 매수된 종목 WebSocket 구독 추가
+        filtered = await filter_signals(db, signals)
+        orders   = await auto_execute_signals(db, filtered)
         if orders:
             from trader.ws_client import update_subscribed_codes, _subscribed_codes
             new_codes = [o["code"] for o in orders]
@@ -210,6 +212,32 @@ async def get_signal_detail(
         "is_executed":  row.is_executed,
         "created_at":   row.created_at.isoformat() if row.created_at else None,
     }
+
+
+# ── Report 엔드포인트 ─────────────────────────────────────────────────────────
+@app.get("/report/daily", tags=["Report"])
+async def daily_report(db: AsyncSession = Depends(get_db)):
+    """일일 수익 리포트 조회 + 텔레그램 발송"""
+    return await send_daily_report(db)
+
+
+@app.get("/report/weekly", tags=["Report"])
+async def weekly_report(db: AsyncSession = Depends(get_db)):
+    """주간 수익 리포트 조회 + 텔레그램 발송"""
+    return await send_weekly_report(db)
+
+
+@app.get("/report/monthly", tags=["Report"])
+async def monthly_report(db: AsyncSession = Depends(get_db)):
+    """월간 손익 통계 조회"""
+    return await get_monthly_stats(db)
+
+
+@app.post("/trade/close-expired", tags=["Trade"])
+async def close_expired(db: AsyncSession = Depends(get_db)):
+    """보유기간 초과 포지션 수동 청산"""
+    closed = await check_and_close_expired_positions(db)
+    return {"message": f"{len(closed)}건 청산", "data": closed}
 
 
 # ── 자동 손절 엔드포인트 (G) ─────────────────────────────────────────────────
