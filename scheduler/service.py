@@ -24,10 +24,12 @@ from api.database import AsyncSessionLocal
 from collector.service import sync_stock_master, collect_daily_ohlcv
 from scanner.service import run_scanner
 from strategy.service import run_strategy
+from strategy.guard import filter_signals, check_and_close_expired_positions
 from ai.service import analyze_all_new_signals
 from notification.service import notify_signals_summary, send_message
 from trader.auto_stoploss import check_and_execute_stop_loss
 from trader.auto_trader import auto_execute_signals
+from report.service import send_daily_report
 
 logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
@@ -63,10 +65,14 @@ async def job_collect_and_run():
         # 4. 텔레그램 알림
         await notify_signals_summary(signals)
 
-        # 5. 자동 매수 실행 ← 핵심 추가
+        # 5. 필터 적용 후 자동 매수
         orders = []
         if signals:
-            orders = await auto_execute_signals(db, signals)
+            filtered = await filter_signals(db, signals)
+            orders   = await auto_execute_signals(db, filtered)
+
+        # 6. 기간 만료 포지션 청산
+        await check_and_close_expired_positions(db)
 
     logger.info(f"[스케줄러] {now} 자동 실행 완료 — 신호 {len(signals)}건, 매수 {len(orders)}건")
 
@@ -81,37 +87,17 @@ async def job_stop_loss_check():
 
 async def job_daily_report():
     """장 마감 후 일일 리포트"""
-    from sqlalchemy import select, func
-    from api.models import Signal, Trade
-
-    today_start = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
-
     async with AsyncSessionLocal() as db:
-        # 오늘 신호 수
-        sig_count = (await db.execute(
-            select(func.count(Signal.id)).where(Signal.created_at >= today_start)
-        )).scalar() or 0
-
-        # 오늘 주문 수 / 총액
-        trade_rows = (await db.execute(
-            select(Trade).where(Trade.created_at >= today_start)
-        )).scalars().all()
-
-    total_amount = sum(t.amount for t in trade_rows)
-    filled = sum(1 for t in trade_rows if t.status == "FILLED")
-
-    msg = (
-        f"📊 <b>[AI INVEST] 일일 리포트</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"📅 {datetime.now(KST).strftime('%Y-%m-%d')}\n"
-        f"🟢 발생 신호: {sig_count}건\n"
-        f"🛒 실행 주문: {filled}건\n"
-        f"💵 총 거래금액: {total_amount:,.0f}원\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"✅ 내일도 화이팅!"
-    )
-    await send_message(msg)
+        await send_daily_report(db)
     logger.info("[스케줄러] 일일 리포트 발송 완료")
+
+
+async def job_weekly_report():
+    """매주 금요일 주간 리포트"""
+    from report.service import send_weekly_report
+    async with AsyncSessionLocal() as db:
+        await send_weekly_report(db)
+    logger.info("[스케줄러] 주간 리포트 발송 완료")
 
 
 # ── 스케줄러 팩토리 ────────────────────────────────────────────────────────────
@@ -135,13 +121,17 @@ def create_scheduler() -> AsyncIOScheduler:
     # 장중 30분마다 손절 체크
     scheduler.add_job(
         job_stop_loss_check,
-        CronTrigger(hour="9-15", minute="*/5", day_of_week="mon-fri", timezone=KST),
+        CronTrigger(hour="9-15", minute="*/30", day_of_week="mon-fri", timezone=KST),
         id="stop_loss_check", name="손절 체크",
     )
 
     # 15:40 일일 리포트
     scheduler.add_job(job_daily_report, CronTrigger(hour=15, minute=40, day_of_week="mon-fri", timezone=KST),
                       id="daily_report", name="일일 리포트")
+
+    # 매주 금요일 16:00 주간 리포트
+    scheduler.add_job(job_weekly_report, CronTrigger(hour=16, minute=0, day_of_week="fri", timezone=KST),
+                      id="weekly_report", name="주간 리포트")
 
     # 매시 정각 헬스체크
     async def job_health():
