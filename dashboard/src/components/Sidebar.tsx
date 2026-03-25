@@ -4,6 +4,7 @@ import { usePathname } from "next/navigation";
 
 const nav = [
   { href: "/",           label: "📊 대시보드" },
+  { href: "/portfolio",  label: "💼 포트폴리오" },
   { href: "/signals",    label: "🟢 신호 목록" },
   { href: "/scanner",    label: "🔍 거래대금 스캔" },
   { href: "/trades",     label: "🛒 체결 내역" },
