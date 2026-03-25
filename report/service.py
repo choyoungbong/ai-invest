@@ -14,6 +14,11 @@ from notification.service import send_message
 
 logger = logging.getLogger(__name__)
 
+def now_kst_naive():
+    """KST 기준 timezone 제거된 datetime 반환"""
+    from pytz import timezone
+    KST = timezone("Asia/Seoul")
+    return datetime.now(KST).replace(tzinfo=None)
 
 async def calc_pnl(db: AsyncSession, start: datetime, end: datetime) -> dict:
     """기간별 손익 계산"""
@@ -83,10 +88,9 @@ async def calc_pnl(db: AsyncSession, start: datetime, end: datetime) -> dict:
 
 async def send_daily_report(db: AsyncSession):
     """일일 수익 리포트 텔레그램 발송"""
-    from pytz import timezone
-    KST   = timezone("Asia/Seoul")
-    today = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
-    end   = datetime.now(KST)
+    now   = now_kst_naive()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end   = now
 
     pnl = await calc_pnl(db, today, end)
 
@@ -125,9 +129,7 @@ async def send_daily_report(db: AsyncSession):
 
 async def send_weekly_report(db: AsyncSession):
     """주간 수익 리포트 텔레그램 발송"""
-    from pytz import timezone
-    KST   = timezone("Asia/Seoul")
-    end   = datetime.now(KST)
+    end   = now_kst_naive()
     start = end - timedelta(days=7)
 
     pnl = await calc_pnl(db, start, end)
@@ -151,9 +153,7 @@ async def send_weekly_report(db: AsyncSession):
 
 async def get_monthly_stats(db: AsyncSession) -> dict:
     """월별 손익 통계"""
-    from pytz import timezone
-    KST   = timezone("Asia/Seoul")
-    end   = datetime.now(KST)
-    start = end.replace(day=1, hour=0, minute=0, second=0)
+    end   = now_kst_naive()
+    start = end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     return await calc_pnl(db, start, end)
