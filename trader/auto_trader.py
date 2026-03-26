@@ -46,6 +46,17 @@ async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[di
         logger.info("AUTO_TRADE_ENABLED=false — 자동 주문 비활성화 상태")
         return []
 
+    # ── 리스크 매니저 통합 체크 ───────────────────────────────────────────────
+    from trader.risk_manager import can_buy
+    buyable, reason = await can_buy(db)
+    if not buyable:
+        logger.info(f"매수 차단: {reason}")
+        await send_message(
+            f"⛔ <b>[AI INVEST] 매수 차단</b>\n"
+            f"사유: {reason}"
+        )
+        return []
+
     executed = []
 
     for sig in signals:
