@@ -1,6 +1,7 @@
 import { api } from "@/lib/api";
 import { StatCard, Card, Badge, ConfidenceBar } from "@/components/Card";
 import { RunStrategyButton, CollectButton } from "@/components/ActionButtons";
+import { RiskWidget } from "@/components/RiskWidget";
 
 function fmt(n: number) {
   if (n >= 1_000_000_000_000) return `${(n / 1_000_000_000_000).toFixed(1)}조`;
@@ -38,6 +39,9 @@ export default async function HomePage() {
           <RunStrategyButton />
         </div>
       </div>
+
+      {/* 리스크 상태 */}
+      <RiskWidget />
 
       {/* 통계 카드 */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
