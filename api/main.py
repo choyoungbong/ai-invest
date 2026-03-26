@@ -37,6 +37,7 @@ from trader.auto_trader import auto_execute_signals
 from trader.ws_client import RealTimeMonitor
 from report.service import send_daily_report, send_weekly_report, get_monthly_stats
 from strategy.guard import filter_signals, check_and_close_expired_positions
+from trader.risk_manager import get_risk_status, can_buy
 from kis_verify.router import router as kis_verify_router
 
 logging.basicConfig(
@@ -212,6 +213,20 @@ async def get_signal_detail(
         "is_executed":  row.is_executed,
         "created_at":   row.created_at.isoformat() if row.created_at else None,
     }
+
+
+# ── Risk Manager 엔드포인트 ───────────────────────────────────────────────────
+@app.get("/risk/status", tags=["Risk"])
+async def risk_status(db: AsyncSession = Depends(get_db)):
+    """현재 리스크 상태 조회 (장 운영여부 / 손실한도 / 보유종목 수)"""
+    return await get_risk_status(db)
+
+@app.post("/risk/reset-daily", tags=["Risk"])
+async def reset_daily_limit():
+    """일일 손실 한도 플래그 수동 초기화 (긴급용)"""
+    from trader.risk_manager import reset_daily_flag
+    reset_daily_flag()
+    return {"message": "일일 손실 한도 플래그 초기화 완료"}
 
 
 # ── Report 엔드포인트 ─────────────────────────────────────────────────────────
