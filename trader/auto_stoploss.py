@@ -102,6 +102,11 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
     )
     buy_trades = (await db.execute(stmt)).scalars().all()
 
+    # 장 외 시간이면 건너뜀
+    from trader.risk_manager import require_market_open
+    if not require_market_open("auto_exit"):
+        return []
+    
     executed = []
 
     for trade in buy_trades:
