@@ -9,8 +9,6 @@ import logging
 import os
 from datetime import datetime, time
 
-import pytz
-
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func
 
@@ -18,7 +16,6 @@ from api.models import Trade
 from notification.service import send_message
 
 logger = logging.getLogger(__name__)
-KST = pytz.timezone("Asia/Seoul")
 
 # ── 파라미터 (환경변수로 관리) ─────────────────────────────────────────────────
 DAILY_LOSS_LIMIT   = int(os.getenv("DAILY_LOSS_LIMIT",   "30000"))   # 일일 최대 손실 (원)
@@ -36,7 +33,7 @@ _limit_hit_date  = None
 def reset_daily_flag():
     """매일 자정 플래그 초기화"""
     global _daily_limit_hit, _limit_hit_date
-    today = datetime.now(KST).date()
+    today = datetime.now().date()
     if _limit_hit_date != today:
         _daily_limit_hit = False
         _limit_hit_date  = None
@@ -59,7 +56,7 @@ async def check_daily_loss(db: AsyncSession) -> tuple[bool, int]:
     if _daily_limit_hit:
         return True, -DAILY_LOSS_LIMIT
 
-    today_start = datetime.now(KST).replace(
+    today_start = datetime.now().replace(
         hour=0, minute=0, second=0, microsecond=0
     )
 
@@ -89,7 +86,7 @@ async def check_daily_loss(db: AsyncSession) -> tuple[bool, int]:
     # 손실 한도 초과 확인
     if today_pnl <= -DAILY_LOSS_LIMIT:
         _daily_limit_hit = True
-        _limit_hit_date  = datetime.now(KST).date()
+        _limit_hit_date  = datetime.now().date()
 
         logger.warning(f"일일 손실 한도 초과: {today_pnl:,}원 (한도: -{DAILY_LOSS_LIMIT:,}원)")
 
@@ -152,7 +149,7 @@ def is_market_open() -> bool:
     현재 시각이 장 운영 시간(기본 09:05~15:20) 내인지 확인합니다.
     주말이면 False 반환.
     """
-    now = datetime.now(KST)
+    now = datetime.now()
 
     # 주말 체크
     if now.weekday() >= 5:
