@@ -22,6 +22,13 @@ logger = logging.getLogger(__name__)
 KST = pytz.timezone('Asia/Seoul')
 
 # ── 파라미터 (환경변수로 관리) ─────────────────────────────────────────────────
+
+raw_value = os.getenv("DAILY_LOSS_LIMIT")
+logger.info(f"DEBUG: ENV DAILY_LOSS_LIMIT RAW VALUE: '{raw_value}'")
+
+raw_value2 = int(os.getenv("DAILY_LOSS_LIMIT"))
+logger.info(f"DEBUG: ENV DAILY_LOSS_LIMIT RAW VALUE: '{raw_value2}'")
+
 DAILY_LOSS_LIMIT   = int(os.getenv("DAILY_LOSS_LIMIT",   "30000"))
 MAX_POSITIONS      = int(os.getenv("MAX_POSITIONS",       "5"))
 TRADE_START_HOUR   = int(os.getenv("TRADE_START_HOUR",   "9"))
