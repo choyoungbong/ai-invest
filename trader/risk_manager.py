@@ -7,6 +7,7 @@ Risk Manager – 실전 투자 방어 시스템 (최종 수정본)
 """
 import logging
 import os
+from dotenv import load_dotenv  # 추가
 from datetime import datetime, time, timedelta
 import pytz  # 타임존 처리를 위해 필요
 
@@ -17,6 +18,9 @@ from api.models import Trade
 from notification.service import send_message
 
 logger = logging.getLogger(__name__)
+
+# .env 파일을 읽어서 환경 변수로 설정합니다.
+load_dotenv()
 
 # ── 타임존 설정 ─────────────────────────────────────────────────────────────
 KST = pytz.timezone('Asia/Seoul')
