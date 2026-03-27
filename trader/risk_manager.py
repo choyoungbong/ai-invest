@@ -1,84 +1,152 @@
 """
-Risk Manager – 실전 투자 방어 시스템 (최종 수정본)
-수정 사항: 
-1. 타임존(KST) 적용으로 서버 시간 오류 해결
-2. 공휴일 체크 로직 구조 추가
-3. 코드 가독성 및 안정성 강화
+Risk Manager — Phase 3/4/5/6 통합 + 미실현 손익 포함
+A. 일일 손실 한도 (실현 + 미실현 손익 합산)
+B. 동시 보유 종목 수 제한
+C. 장 운영 시간 확인
+D. 슬리피지 체크
+E. 과매매 방지
+F. 수수료 계산
 """
 import logging
 import os
-from dotenv import load_dotenv  # 추가
 from datetime import datetime, time, timedelta
-import pytz  # 타임존 처리를 위해 필요
 
+import pytz
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func, desc
 
 from api.models import Trade
 from notification.service import send_message
 
+from dotenv import load_dotenv  # 추가
+
 logger = logging.getLogger(__name__)
+KST = pytz.timezone("Asia/Seoul")
 
 # .env 파일을 읽어서 환경 변수로 설정합니다.
 load_dotenv()
 
-# ── 타임존 설정 ─────────────────────────────────────────────────────────────
-KST = pytz.timezone('Asia/Seoul')
+# ── 환경변수 파라미터 ──────────────────────────────────────────────────────────
+DAILY_LOSS_LIMIT     = int(os.getenv("DAILY_LOSS_LIMIT",     "30000"))
+MAX_POSITIONS        = int(os.getenv("MAX_POSITIONS",         "5"))
+TRADE_START_HOUR     = int(os.getenv("TRADE_START_HOUR",     "9"))
+TRADE_START_MINUTE   = int(os.getenv("TRADE_START_MINUTE",   "5"))
+TRADE_END_HOUR       = int(os.getenv("TRADE_END_HOUR",       "15"))
+TRADE_END_MINUTE     = int(os.getenv("TRADE_END_MINUTE",     "20"))
+SLIPPAGE_LIMIT_PCT   = float(os.getenv("SLIPPAGE_LIMIT_PCT", "0.005"))
+REENTRY_MINUTES      = int(os.getenv("REENTRY_MINUTES",      "60"))
+STOP_REENTRY_MINUTES = int(os.getenv("STOP_REENTRY_MINUTES", "30"))
+MAX_DAILY_TRADES     = int(os.getenv("MAX_DAILY_TRADES",     "10"))
+BUY_COMMISSION       = float(os.getenv("BUY_COMMISSION",     "0.00015"))
+SELL_COMMISSION      = float(os.getenv("SELL_COMMISSION",    "0.00015"))
+DEFAULT_SLIPPAGE     = float(os.getenv("DEFAULT_SLIPPAGE",   "0.0005"))
+SIMULATION_MODE      = os.getenv("SIMULATION_MODE", "true").lower() == "true"
 
-# ── 파라미터 (환경변수로 관리) ─────────────────────────────────────────────────
-
-raw_value = os.getenv("DAILY_LOSS_LIMIT")
-logger.info(f"DEBUG: ENV DAILY_LOSS_LIMIT RAW VALUE: '{raw_value}'")
-
-DAILY_LOSS_LIMIT   = int(os.getenv("DAILY_LOSS_LIMIT",   "30000"))
-MAX_POSITIONS      = int(os.getenv("MAX_POSITIONS",       "5"))
-TRADE_START_HOUR   = int(os.getenv("TRADE_START_HOUR",   "9"))
-TRADE_START_MINUTE = int(os.getenv("TRADE_START_MINUTE", "5"))
-TRADE_END_HOUR     = int(os.getenv("TRADE_END_HOUR",     "15"))
-TRADE_END_MINUTE   = int(os.getenv("TRADE_END_MINUTE",   "20"))
-
-# 일일 손실 한도 초과 시 당일 매매 중단 플래그
+# 일일 한도 플래그
 _daily_limit_hit = False
 _limit_hit_date  = None
 
-def get_now():
-    """한국 표준시(KST) 기준 현재 시간 반환"""
-    return datetime.now(KST)
 
 def reset_daily_flag():
-    """매일 자정 플래그 초기화 (KST 기준)"""
     global _daily_limit_hit, _limit_hit_date
-    today = get_now().date()
+    today = datetime.now(KST).date()
     if _limit_hit_date != today:
         _daily_limit_hit = False
         _limit_hit_date  = None
 
-# ── A. 일일 손실 한도 ──────────────────────────────────────────────────────────
+
+# ── C. 장 운영 시간 ────────────────────────────────────────────────────────────
+
+def is_market_open() -> bool:
+    now = datetime.now(KST)
+    if now.weekday() >= 5:
+        return False
+    current    = now.time()
+    start_time = time(TRADE_START_HOUR, TRADE_START_MINUTE)
+    end_time   = time(TRADE_END_HOUR, TRADE_END_MINUTE)
+    return start_time <= current <= end_time
+
+
+def require_market_open(func_name: str = "") -> bool:
+    if not is_market_open():
+        logger.debug(f"[{func_name}] 장 외 시간 — 건너뜀")
+        return False
+    return True
+
+
+# ── A. 일일 손실 한도 (실현 + 미실현 포함) ────────────────────────────────────
+
+async def calc_unrealized_pnl(db: AsyncSession) -> int:
+    """
+    현재 보유 중인 포지션의 미실현 손익을 계산합니다.
+    KIS API에서 현재가를 조회해 계산합니다.
+    """
+    # 보유 중인 BUY 포지션 조회
+    stmt = (
+        select(Trade)
+        .where(and_(
+            Trade.order_type == "BUY",
+            Trade.status.in_(["FILLED", "PARTIAL"]),
+        ))
+    )
+    buy_trades = (await db.execute(stmt)).scalars().all()
+
+    unrealized = 0
+    for trade in buy_trades:
+        # 이미 매도된 포지션 제외
+        sold = (await db.execute(
+            select(Trade).where(and_(
+                Trade.code == trade.code,
+                Trade.order_type == "SELL",
+                Trade.signal_id == trade.signal_id,
+            ))
+        )).scalars().first()
+        if sold:
+            continue
+
+        # 장 중에만 현재가 조회 (장 외에는 매수가 기준)
+        if is_market_open():
+            try:
+                from trader import kis_client as kis
+                price_data    = await kis.get_current_price(trade.code)
+                current_price = price_data.get("price", 0)
+                if current_price > 0:
+                    unrealized += (current_price - trade.price) * trade.quantity
+                    continue
+            except Exception:
+                pass
+
+        # 장 외 또는 조회 실패 시 매수가 기준 (0으로 처리)
+        unrealized += 0
+
+    return int(unrealized)
+
 
 async def check_daily_loss(db: AsyncSession) -> tuple[bool, int]:
+    """
+    오늘 실현 손익 + 미실현 손익을 합산해 한도 초과 여부 확인.
+    Returns: (한도초과여부, 오늘총손익)
+    """
     global _daily_limit_hit, _limit_hit_date
-
     reset_daily_flag()
 
     if _daily_limit_hit:
         return True, -DAILY_LOSS_LIMIT
 
-    # 오늘 시작 시각 (KST 기준)
-    now_kst = get_now()
-    today_start = now_kst.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    stmt = (
-        select(Trade)
-        .where(and_(
-            Trade.order_type == "SELL",
-            Trade.status == "FILLED",
-            Trade.created_at >= today_start.replace(tzinfo=None), # DB가 naive datetime인 경우 대응
-        ))
+    today_start = datetime.now(KST).replace(
+        hour=0, minute=0, second=0, microsecond=0
     )
-    sell_trades = (await db.execute(stmt)).scalars().all()
 
-    today_pnl = 0
-    for sell in sell_trades:
+    # 실현 손익 계산
+    stmt = select(Trade).where(and_(
+        Trade.order_type == "SELL",
+        Trade.status == "FILLED",
+        Trade.created_at >= today_start,
+    ))
+    sells = (await db.execute(stmt)).scalars().all()
+
+    realized_pnl = 0
+    for sell in sells:
         buy_stmt = select(Trade).where(and_(
             Trade.code == sell.code,
             Trade.order_type == "BUY",
@@ -86,107 +154,240 @@ async def check_daily_loss(db: AsyncSession) -> tuple[bool, int]:
         ))
         buy = (await db.execute(buy_stmt)).scalars().first()
         if buy:
-            today_pnl += (sell.price - buy.price) * sell.quantity
+            gross = (sell.price - buy.price) * sell.quantity
+            comm  = (buy.commission or 0) + (sell.commission or 0)
+            realized_pnl += gross - comm
 
-    if today_pnl <= -DAILY_LOSS_LIMIT:
+    # 미실현 손익 계산
+    unrealized_pnl = await calc_unrealized_pnl(db)
+
+    # 합산
+    total_pnl = realized_pnl + unrealized_pnl
+
+    logger.debug(
+        f"일일 손익 — 실현: {realized_pnl:+,}원 / "
+        f"미실현: {unrealized_pnl:+,}원 / 합계: {total_pnl:+,}원"
+    )
+
+    if total_pnl <= -DAILY_LOSS_LIMIT:
         _daily_limit_hit = True
-        _limit_hit_date  = now_kst.date()
-
-        logger.warning(f"일일 손실 한도 초과: {today_pnl:,}원 (한도: -{DAILY_LOSS_LIMIT:,}원)")
+        _limit_hit_date  = datetime.now(KST).date()
+        logger.warning(f"일일 손실 한도 초과: {total_pnl:,}원")
         await send_message(
             f"🚨 <b>[AI INVEST] 일일 손실 한도 초과</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"📉 오늘 손익: <b>{today_pnl:+,}원</b>\n"
+            f"📉 실현 손익: {realized_pnl:+,}원\n"
+            f"📊 미실현 손익: {unrealized_pnl:+,}원\n"
+            f"💥 합계: <b>{total_pnl:+,}원</b>\n"
             f"🛑 한도: -{DAILY_LOSS_LIMIT:,}원\n"
             f"⛔ 오늘 신규 매수를 중단합니다."
         )
-        return True, today_pnl
+        return True, total_pnl
 
-    return False, today_pnl
+    return False, total_pnl
 
-# ── B. 동시 보유 종목 수 제한 ──────────────────────────────────────────────────
+
+# ── B. 동시 보유 종목 수 ───────────────────────────────────────────────────────
 
 async def check_max_positions(db: AsyncSession) -> tuple[bool, int]:
-    stmt = (
-        select(Trade.code)
-        .where(and_(
-            Trade.order_type == "BUY",
-            Trade.status == "FILLED",
-        ))
-        .distinct()
-    )
-    buy_codes = (await db.execute(stmt)).scalars().all()
+    stmt  = select(Trade.code).where(and_(
+        Trade.order_type == "BUY",
+        Trade.status.in_(["FILLED", "PARTIAL"]),
+    )).distinct()
+    codes = (await db.execute(stmt)).scalars().all()
 
     active = 0
-    for code in buy_codes:
-        sell_stmt = select(Trade).where(and_(
-            Trade.code == code,
-            Trade.order_type == "SELL",
-            Trade.status == "FILLED",
-        ))
-        sold = (await db.execute(sell_stmt)).scalars().first()
+    for code in codes:
+        sold = (await db.execute(
+            select(Trade).where(and_(
+                Trade.code == code,
+                Trade.order_type == "SELL",
+                Trade.status.in_(["FILLED", "PARTIAL"]),
+            ))
+        )).scalars().first()
         if not sold:
             active += 1
 
-    exceeded = active >= MAX_POSITIONS
-    return exceeded, active
+    return active >= MAX_POSITIONS, active
 
-# ── C. 장 운영 시간 확인 ───────────────────────────────────────────────────────
 
-def is_market_open() -> bool:
-    """KST 기준 장 운영 시간 및 공휴일 확인"""
-    now = get_now()
+# ── D. 슬리피지 체크 ──────────────────────────────────────────────────────────
 
-    # 1. 주말 체크
-    if now.weekday() >= 5:
-        return False
+async def check_slippage(signal_price: float, current_price: float) -> tuple[bool, float]:
+    if signal_price <= 0:
+        return False, 0.0
+    slippage_pct = abs(current_price - signal_price) / signal_price
+    exceeded     = slippage_pct > SLIPPAGE_LIMIT_PCT
+    if exceeded:
+        logger.warning(
+            f"슬리피지 초과: 신호가 {signal_price:,} → 현재가 {current_price:,} "
+            f"({slippage_pct*100:.2f}% > {SLIPPAGE_LIMIT_PCT*100:.1f}%)"
+        )
+    return exceeded, round(slippage_pct, 6)
 
-    # 2. 공휴일 체크 (필요 시 추가 개발)
-    # is_holiday = check_holiday(now.date()) 
-    # if is_holiday: return False
 
-    # 3. 시간대 체크
-    current_time = now.time()
-    start_time   = time(TRADE_START_HOUR, TRADE_START_MINUTE)
-    end_time     = time(TRADE_END_HOUR,   TRADE_END_MINUTE)
+# ── E. 과매매 방지 ─────────────────────────────────────────────────────────────
 
-    return start_time <= current_time <= end_time
+async def check_overtrading(db: AsyncSession, code: str) -> tuple[bool, str]:
+    now         = datetime.utcnow()
+    today_start = datetime.now(KST).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
 
-def require_market_open(func_name: str = "") -> bool:
-    if not is_market_open():
-        logger.debug(f"[{func_name}] 장 외 시간 — KIS API 호출 건너뜀")
-        return False
-    return True
+    # 1) 하루 최대 거래 횟수
+    day_count = (await db.execute(
+        select(func.count(Trade.id)).where(and_(
+            Trade.created_at >= today_start,
+            Trade.order_type == "BUY",
+            Trade.status.in_(["FILLED", "PARTIAL"]),
+        ))
+    )).scalar() or 0
 
-# ── 통합 방어 체크 ─────────────────────────────────────────────────────────────
+    if day_count >= MAX_DAILY_TRADES:
+        return True, f"일일 최대 거래 횟수 초과 ({day_count}/{MAX_DAILY_TRADES})"
 
-async def can_buy(db: AsyncSession) -> tuple[bool, str]:
+    # 2) 손절 후 재진입 제한
+    stop_cutoff = now - timedelta(minutes=STOP_REENTRY_MINUTES)
+    recent_sell = (await db.execute(
+        select(Trade).where(and_(
+            Trade.code == code,
+            Trade.order_type == "SELL",
+            Trade.status == "FILLED",
+            Trade.created_at >= stop_cutoff,
+        )).order_by(desc(Trade.created_at)).limit(1)
+    )).scalars().first()
+
+    if recent_sell:
+        buy_of_sell = (await db.execute(
+            select(Trade).where(and_(
+                Trade.code == code,
+                Trade.order_type == "BUY",
+                Trade.signal_id == recent_sell.signal_id,
+            ))
+        )).scalars().first()
+        if buy_of_sell and recent_sell.price < buy_of_sell.price:
+            remain = STOP_REENTRY_MINUTES - int(
+                (now - recent_sell.created_at).seconds / 60
+            )
+            return True, f"손절 후 재진입 제한 (잔여 {remain}분)"
+
+    # 3) 일반 재진입 제한
+    reentry_cutoff = now - timedelta(minutes=REENTRY_MINUTES)
+    recent_buy = (await db.execute(
+        select(Trade).where(and_(
+            Trade.code == code,
+            Trade.order_type == "BUY",
+            Trade.status.in_(["FILLED", "PARTIAL"]),
+            Trade.created_at >= reentry_cutoff,
+        ))
+    )).scalars().first()
+
+    if recent_buy:
+        remain = REENTRY_MINUTES - int(
+            (now - recent_buy.created_at).seconds / 60
+        )
+        return True, f"동일 종목 재진입 제한 (잔여 {remain}분)"
+
+    return False, ""
+
+
+# ── F. 수수료 계산 ─────────────────────────────────────────────────────────────
+
+def calc_commission(price: float, quantity: int, is_buy: bool) -> float:
+    rate = BUY_COMMISSION if is_buy else SELL_COMMISSION
+    return round(price * quantity * rate, 0)
+
+
+def calc_net_profit(
+    buy_price: float,
+    sell_price: float,
+    quantity: int
+) -> dict:
+    gross      = (sell_price - buy_price) * quantity
+    buy_comm   = calc_commission(buy_price,  quantity, is_buy=True)
+    sell_comm  = calc_commission(sell_price, quantity, is_buy=False)
+    slip_cost  = sell_price * quantity * DEFAULT_SLIPPAGE
+    net        = gross - buy_comm - sell_comm - slip_cost
+    base       = buy_price * quantity
+    return {
+        "theory_profit":   round(gross, 0),
+        "buy_commission":  round(buy_comm, 0),
+        "sell_commission": round(sell_comm, 0),
+        "slippage_cost":   round(slip_cost, 0),
+        "net_profit":      round(net, 0),
+        "net_profit_pct":  round(net / base * 100, 2) if base > 0 else 0,
+    }
+
+
+# ── 통합 매수 가능 체크 ────────────────────────────────────────────────────────
+
+async def can_buy(db: AsyncSession, code: str = "") -> tuple[bool, str]:
     if not is_market_open():
         return False, "장 외 시간"
 
-    loss_hit, today_pnl = await check_daily_loss(db)
+    loss_hit, pnl = await check_daily_loss(db)
     if loss_hit:
-        return False, f"일일 손실 한도 초과 ({today_pnl:+,}원)"
+        return False, f"일일 손실 한도 초과 ({pnl:+,}원)"
 
-    pos_hit, pos_count = await check_max_positions(db)
+    pos_hit, cnt = await check_max_positions(db)
     if pos_hit:
-        return False, f"최대 보유 종목 수 초과 ({pos_count}/{MAX_POSITIONS})"
+        return False, f"최대 보유 종목 수 초과 ({cnt}/{MAX_POSITIONS})"
+
+    if code:
+        over, reason = await check_overtrading(db, code)
+        if over:
+            return False, reason
 
     return True, ""
 
+
 async def get_risk_status(db: AsyncSession) -> dict:
-    _, today_pnl    = await check_daily_loss(db)
-    _, pos_count    = await check_max_positions(db)
-    market_open     = is_market_open()
+    """현재 리스크 상태 요약 (미실현 손익 포함)"""
+    today_start = datetime.now(KST).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+    # 실현 손익
+    stmt = select(Trade).where(and_(
+        Trade.order_type == "SELL",
+        Trade.status == "FILLED",
+        Trade.created_at >= today_start,
+    ))
+    sells = (await db.execute(stmt)).scalars().all()
+    realized = 0
+    for sell in sells:
+        buy = (await db.execute(
+            select(Trade).where(and_(
+                Trade.code == sell.code,
+                Trade.order_type == "BUY",
+                Trade.signal_id == sell.signal_id,
+            ))
+        )).scalars().first()
+        if buy:
+            realized += (sell.price - buy.price) * sell.quantity - (
+                (buy.commission or 0) + (sell.commission or 0)
+            )
+
+    # 미실현 손익
+    unrealized = await calc_unrealized_pnl(db)
+
+    _, pos_cnt  = await check_max_positions(db)
+    market_open = is_market_open()
     buyable, reason = await can_buy(db)
 
     return {
         "market_open":      market_open,
         "can_buy":          buyable,
         "block_reason":     reason,
-        "today_pnl":        today_pnl,
+        "today_pnl":        int(realized + unrealized),
+        "realized_pnl":     int(realized),
+        "unrealized_pnl":   int(unrealized),
         "daily_loss_limit": -DAILY_LOSS_LIMIT,
-        "positions":        pos_count,
+        "positions":        pos_cnt,
         "max_positions":    MAX_POSITIONS,
         "daily_limit_hit":  _daily_limit_hit,
+        "max_daily_trades": MAX_DAILY_TRADES,
+        "slippage_limit":   f"{SLIPPAGE_LIMIT_PCT*100:.1f}%",
+        "commission_rate":  f"{BUY_COMMISSION*100:.3f}%",
+        "simulation_mode":  SIMULATION_MODE,
     }
