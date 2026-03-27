@@ -1,15 +1,14 @@
 """
 Risk Manager — Phase 3/4/5/6 통합 + 미실현 손익 포함
-A. 일일 손실 한도 (실현 + 미실현 손익 합산)
-B. 동시 보유 종목 수 제한
-C. 장 운영 시간 확인
-D. 슬리피지 체크
-E. 과매매 방지
-F. 수수료 계산
+
+타임존 규칙:
+  - DB 쿼리용 datetime: naive UTC (datetime.utcnow())
+  - 화면/로직용 datetime: KST aware (datetime.now(KST))
+  - DB의 created_at은 TIMESTAMP WITHOUT TIME ZONE (naive UTC) 로 저장됨
 """
 import logging
 import os
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 
 import pytz
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,13 +17,30 @@ from sqlalchemy import select, and_, func, desc
 from api.models import Trade
 from notification.service import send_message
 
-from dotenv import load_dotenv  # 추가
-
 logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
+UTC = timezone.utc
 
-# .env 파일을 읽어서 환경 변수로 설정합니다.
-load_dotenv()
+
+# ── 타임존 헬퍼 ───────────────────────────────────────────────────────────────
+
+def _kst_today_start_utc() -> datetime:
+    """
+    KST 오늘 00:00 를 naive UTC 로 변환.
+    DB 쿼리에 사용합니다.
+    KST = UTC+9 이므로 KST 00:00 = UTC 전날 15:00
+    """
+    now_kst   = datetime.now(KST)
+    today_kst = now_kst.replace(hour=0, minute=0, second=0, microsecond=0)
+    # KST → UTC 변환 후 tzinfo 제거 (naive UTC)
+    today_utc = today_kst.astimezone(pytz.utc).replace(tzinfo=None)
+    return today_utc
+
+
+def _utcnow() -> datetime:
+    """naive UTC 현재 시각 (DB 쿼리용)"""
+    return datetime.utcnow()
+
 
 # ── 환경변수 파라미터 ──────────────────────────────────────────────────────────
 DAILY_LOSS_LIMIT     = int(os.getenv("DAILY_LOSS_LIMIT",     "30000"))
@@ -49,8 +65,8 @@ _limit_hit_date  = None
 
 def reset_daily_flag():
     global _daily_limit_hit, _limit_hit_date
-    today = datetime.now(KST).date()
-    if _limit_hit_date != today:
+    today_kst = datetime.now(KST).date()
+    if _limit_hit_date != today_kst:
         _daily_limit_hit = False
         _limit_hit_date  = None
 
@@ -58,10 +74,10 @@ def reset_daily_flag():
 # ── C. 장 운영 시간 ────────────────────────────────────────────────────────────
 
 def is_market_open() -> bool:
-    now = datetime.now(KST)
-    if now.weekday() >= 5:
+    now_kst = datetime.now(KST)
+    if now_kst.weekday() >= 5:
         return False
-    current    = now.time()
+    current    = now_kst.time()
     start_time = time(TRADE_START_HOUR, TRADE_START_MINUTE)
     end_time   = time(TRADE_END_HOUR, TRADE_END_MINUTE)
     return start_time <= current <= end_time
@@ -77,11 +93,7 @@ def require_market_open(func_name: str = "") -> bool:
 # ── A. 일일 손실 한도 (실현 + 미실현 포함) ────────────────────────────────────
 
 async def calc_unrealized_pnl(db: AsyncSession) -> int:
-    """
-    현재 보유 중인 포지션의 미실현 손익을 계산합니다.
-    KIS API에서 현재가를 조회해 계산합니다.
-    """
-    # 보유 중인 BUY 포지션 조회
+    """현재 보유 포지션의 미실현 손익 계산"""
     stmt = (
         select(Trade)
         .where(and_(
@@ -93,7 +105,6 @@ async def calc_unrealized_pnl(db: AsyncSession) -> int:
 
     unrealized = 0
     for trade in buy_trades:
-        # 이미 매도된 포지션 제외
         sold = (await db.execute(
             select(Trade).where(and_(
                 Trade.code == trade.code,
@@ -104,7 +115,7 @@ async def calc_unrealized_pnl(db: AsyncSession) -> int:
         if sold:
             continue
 
-        # 장 중에만 현재가 조회 (장 외에는 매수가 기준)
+        # 장 중에만 현재가 조회
         if is_market_open():
             try:
                 from trader import kis_client as kis
@@ -116,53 +127,43 @@ async def calc_unrealized_pnl(db: AsyncSession) -> int:
             except Exception:
                 pass
 
-        # 장 외 또는 조회 실패 시 매수가 기준 (0으로 처리)
-        unrealized += 0
-
     return int(unrealized)
 
 
 async def check_daily_loss(db: AsyncSession) -> tuple[bool, int]:
-    """
-    오늘 실현 손익 + 미실현 손익을 합산해 한도 초과 여부 확인.
-    Returns: (한도초과여부, 오늘총손익)
-    """
+    """오늘 실현 + 미실현 손익 합산해 한도 초과 여부 확인"""
     global _daily_limit_hit, _limit_hit_date
     reset_daily_flag()
 
     if _daily_limit_hit:
         return True, -DAILY_LOSS_LIMIT
 
-    today_start = datetime.now(KST).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    # ✅ DB 쿼리: naive UTC 사용
+    today_start_utc = _kst_today_start_utc()
 
-    # 실현 손익 계산
     stmt = select(Trade).where(and_(
         Trade.order_type == "SELL",
         Trade.status == "FILLED",
-        Trade.created_at >= today_start,
+        Trade.created_at >= today_start_utc,   # naive UTC ↔ naive UTC 비교
     ))
     sells = (await db.execute(stmt)).scalars().all()
 
     realized_pnl = 0
     for sell in sells:
-        buy_stmt = select(Trade).where(and_(
-            Trade.code == sell.code,
-            Trade.order_type == "BUY",
-            Trade.signal_id == sell.signal_id,
-        ))
-        buy = (await db.execute(buy_stmt)).scalars().first()
+        buy = (await db.execute(
+            select(Trade).where(and_(
+                Trade.code == sell.code,
+                Trade.order_type == "BUY",
+                Trade.signal_id == sell.signal_id,
+            ))
+        )).scalars().first()
         if buy:
             gross = (sell.price - buy.price) * sell.quantity
             comm  = (buy.commission or 0) + (sell.commission or 0)
             realized_pnl += gross - comm
 
-    # 미실현 손익 계산
     unrealized_pnl = await calc_unrealized_pnl(db)
-
-    # 합산
-    total_pnl = realized_pnl + unrealized_pnl
+    total_pnl      = realized_pnl + unrealized_pnl
 
     logger.debug(
         f"일일 손익 — 실현: {realized_pnl:+,}원 / "
@@ -213,7 +214,10 @@ async def check_max_positions(db: AsyncSession) -> tuple[bool, int]:
 
 # ── D. 슬리피지 체크 ──────────────────────────────────────────────────────────
 
-async def check_slippage(signal_price: float, current_price: float) -> tuple[bool, float]:
+async def check_slippage(
+    signal_price: float,
+    current_price: float,
+) -> tuple[bool, float]:
     if signal_price <= 0:
         return False, 0.0
     slippage_pct = abs(current_price - signal_price) / signal_price
@@ -229,15 +233,14 @@ async def check_slippage(signal_price: float, current_price: float) -> tuple[boo
 # ── E. 과매매 방지 ─────────────────────────────────────────────────────────────
 
 async def check_overtrading(db: AsyncSession, code: str) -> tuple[bool, str]:
-    now         = datetime.utcnow()
-    today_start = datetime.now(KST).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    # ✅ DB 쿼리: 모두 naive UTC 사용
+    now_utc         = _utcnow()
+    today_start_utc = _kst_today_start_utc()
 
     # 1) 하루 최대 거래 횟수
     day_count = (await db.execute(
         select(func.count(Trade.id)).where(and_(
-            Trade.created_at >= today_start,
+            Trade.created_at >= today_start_utc,   # naive UTC
             Trade.order_type == "BUY",
             Trade.status.in_(["FILLED", "PARTIAL"]),
         ))
@@ -247,13 +250,13 @@ async def check_overtrading(db: AsyncSession, code: str) -> tuple[bool, str]:
         return True, f"일일 최대 거래 횟수 초과 ({day_count}/{MAX_DAILY_TRADES})"
 
     # 2) 손절 후 재진입 제한
-    stop_cutoff = now - timedelta(minutes=STOP_REENTRY_MINUTES)
+    stop_cutoff_utc = now_utc - timedelta(minutes=STOP_REENTRY_MINUTES)
     recent_sell = (await db.execute(
         select(Trade).where(and_(
             Trade.code == code,
             Trade.order_type == "SELL",
             Trade.status == "FILLED",
-            Trade.created_at >= stop_cutoff,
+            Trade.created_at >= stop_cutoff_utc,   # naive UTC
         )).order_by(desc(Trade.created_at)).limit(1)
     )).scalars().first()
 
@@ -266,26 +269,24 @@ async def check_overtrading(db: AsyncSession, code: str) -> tuple[bool, str]:
             ))
         )).scalars().first()
         if buy_of_sell and recent_sell.price < buy_of_sell.price:
-            remain = STOP_REENTRY_MINUTES - int(
-                (now - recent_sell.created_at).seconds / 60
-            )
+            elapsed = (now_utc - recent_sell.created_at).total_seconds() / 60
+            remain  = max(0, int(STOP_REENTRY_MINUTES - elapsed))
             return True, f"손절 후 재진입 제한 (잔여 {remain}분)"
 
     # 3) 일반 재진입 제한
-    reentry_cutoff = now - timedelta(minutes=REENTRY_MINUTES)
+    reentry_cutoff_utc = now_utc - timedelta(minutes=REENTRY_MINUTES)
     recent_buy = (await db.execute(
         select(Trade).where(and_(
             Trade.code == code,
             Trade.order_type == "BUY",
             Trade.status.in_(["FILLED", "PARTIAL"]),
-            Trade.created_at >= reentry_cutoff,
+            Trade.created_at >= reentry_cutoff_utc,   # naive UTC
         ))
     )).scalars().first()
 
     if recent_buy:
-        remain = REENTRY_MINUTES - int(
-            (now - recent_buy.created_at).seconds / 60
-        )
+        elapsed = (now_utc - recent_buy.created_at).total_seconds() / 60
+        remain  = max(0, int(REENTRY_MINUTES - elapsed))
         return True, f"동일 종목 재진입 제한 (잔여 {remain}분)"
 
     return False, ""
@@ -298,17 +299,13 @@ def calc_commission(price: float, quantity: int, is_buy: bool) -> float:
     return round(price * quantity * rate, 0)
 
 
-def calc_net_profit(
-    buy_price: float,
-    sell_price: float,
-    quantity: int
-) -> dict:
-    gross      = (sell_price - buy_price) * quantity
-    buy_comm   = calc_commission(buy_price,  quantity, is_buy=True)
-    sell_comm  = calc_commission(sell_price, quantity, is_buy=False)
-    slip_cost  = sell_price * quantity * DEFAULT_SLIPPAGE
-    net        = gross - buy_comm - sell_comm - slip_cost
-    base       = buy_price * quantity
+def calc_net_profit(buy_price: float, sell_price: float, quantity: int) -> dict:
+    gross     = (sell_price - buy_price) * quantity
+    buy_comm  = calc_commission(buy_price,  quantity, is_buy=True)
+    sell_comm = calc_commission(sell_price, quantity, is_buy=False)
+    slip_cost = sell_price * quantity * DEFAULT_SLIPPAGE
+    net       = gross - buy_comm - sell_comm - slip_cost
+    base      = buy_price * quantity
     return {
         "theory_profit":   round(gross, 0),
         "buy_commission":  round(buy_comm, 0),
@@ -343,17 +340,16 @@ async def can_buy(db: AsyncSession, code: str = "") -> tuple[bool, str]:
 
 async def get_risk_status(db: AsyncSession) -> dict:
     """현재 리스크 상태 요약 (미실현 손익 포함)"""
-    today_start = datetime.now(KST).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    # ✅ DB 쿼리: naive UTC 사용
+    today_start_utc = _kst_today_start_utc()
 
-    # 실현 손익
     stmt = select(Trade).where(and_(
         Trade.order_type == "SELL",
         Trade.status == "FILLED",
-        Trade.created_at >= today_start,
+        Trade.created_at >= today_start_utc,   # naive UTC
     ))
     sells = (await db.execute(stmt)).scalars().all()
+
     realized = 0
     for sell in sells:
         buy = (await db.execute(
@@ -368,11 +364,9 @@ async def get_risk_status(db: AsyncSession) -> dict:
                 (buy.commission or 0) + (sell.commission or 0)
             )
 
-    # 미실현 손익
-    unrealized = await calc_unrealized_pnl(db)
-
-    _, pos_cnt  = await check_max_positions(db)
-    market_open = is_market_open()
+    unrealized      = await calc_unrealized_pnl(db)
+    _, pos_cnt      = await check_max_positions(db)
+    market_open     = is_market_open()
     buyable, reason = await can_buy(db)
 
     return {
