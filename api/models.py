@@ -1,5 +1,7 @@
 """
 DB 모델 — 수수료/슬리피지/부분체결/기술지표 컬럼 포함
+  + 분할매수: Trade.phase / Trade.parent_trade_id
+  + 블랙리스트: StockBlacklist
 """
 from sqlalchemy import Column, String, Float, Integer, DateTime, Boolean, Text, BigInteger, Numeric
 from sqlalchemy.ext.declarative import declarative_base
@@ -86,6 +88,10 @@ class Trade(Base):
     """
     체결 내역
     status: PENDING / PARTIAL / FILLED / CANCELLED / FAILED
+
+    [분할매수 필드]
+      phase           : 1=1차매수, 2=2차매수 (기본 1)
+      parent_trade_id : 2차 매수 시 1차 매수 trade.id 참조
     """
     __tablename__ = "trades"
     id               = Column(String(36), primary_key=True, default=gen_uuid)
@@ -103,6 +109,9 @@ class Trade(Base):
     slippage         = Column(Float, default=0)
     theory_profit    = Column(Float)              # 이론 수익
     real_profit      = Column(Float)              # 실전 수익 (수수료/슬리피지 반영)
+    # 분할매수
+    phase            = Column(Integer, default=1) # 1=1차, 2=2차
+    parent_trade_id  = Column(String(36), nullable=True)  # 2차 매수 시 1차 trade ID
     # 상태
     status           = Column(String(20), default="PENDING")
     broker_order_id  = Column(String(100))
@@ -125,3 +134,17 @@ class DailyStats(Base):
     net_profit     = Column(Float, default=0)
     created_at     = Column(DateTime, server_default=func.now())
     updated_at     = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class StockBlacklist(Base):
+    """
+    손절 후 재진입 금지 블랙리스트
+    expires_at 이후 자동 해제
+    """
+    __tablename__ = "stock_blacklist"
+    id             = Column(Integer, primary_key=True, autoincrement=True)
+    code           = Column(String(10), nullable=False, index=True)
+    name           = Column(String(100))
+    reason         = Column(String(200))
+    blacklisted_at = Column(DateTime, server_default=func.now())
+    expires_at     = Column(DateTime, nullable=False, index=True)
