@@ -20,7 +20,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, desc
+from sqlalchemy import select, and_, desc, func
 
 from api.models import Signal, Trade
 from trader import kis_client as kis
@@ -50,15 +50,37 @@ async def _get_open_position(db: AsyncSession, signal_id: str) -> dict | None:
         }
         또는 None (포지션 없음 / 이미 청산)
     """
-    # 해당 signal_id에 SELL 이미 있으면 청산 완료
-    sell_exists = (await db.execute(
+    # 수정 — FAILED 3회 이상이면 포기 처리
+    sell_filled = (await db.execute(
         select(Trade).where(and_(
             Trade.signal_id == signal_id,
             Trade.order_type == "SELL",
-            Trade.status == "FILLED",
+            Trade.status.in_(["FILLED", "PARTIAL"]),
         ))
     )).scalars().first()
-    if sell_exists:
+    if sell_filled:
+        return None
+    
+    # FAILED가 3회 이상이면 더 이상 시도하지 않음
+    failed_count = (await db.execute(
+        select(func.count(Trade.id)).where(and_(
+            Trade.signal_id == signal_id,
+            Trade.order_type == "SELL",
+            Trade.status == "FAILED",
+        ))
+    )).scalar() or 0
+    
+    if failed_count >= 3:
+        logger.warning(
+            f"[{signal_id[:8]}] 매도 FAILED {failed_count}회 — "
+            f"자동 중단, 수동 확인 필요"
+        )
+        await send_message(
+            f"🚨 <b>[AI INVEST] 매도 반복 실패 — 수동 확인 필요</b>\n"
+            f"signal_id: {signal_id[:16]}...\n"
+            f"실패 횟수: {failed_count}회\n"
+            f"자동 재시도를 중단합니다."
+        )
         return None
 
     # 모든 BUY 포지션 수집 (phase 1 + 2)
