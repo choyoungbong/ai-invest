@@ -2,19 +2,21 @@
 Auto Trader – 신호 발생 시 자동 매수 실행 (분할매수 지원)
 
 분할매수 전략:
-  1차 매수: 신호 발생 즉시 예산의 SPLIT_BUY_RATIO(기본 50%) 만큼 매수
-  2차 매수: 1차 매수 후 최소 SPLIT_BUY_MIN_MINUTES(10분) 경과 &
-            현재가가 1차 매수가 대비 SPLIT_BUY_TRIGGER_PCT(+0.5%) 이상 상승 확인 시
-            나머지 예산(50%)으로 추가 매수
+  1차 매수: 신호 발생 즉시 예산의 SPLIT_BUY_RATIO(기본 60%) 만큼 매수
+  2차 매수: 1차 매수 후 최소 SPLIT_BUY_MIN_MINUTES(5분) 경과 &
+            현재가가 1차 매수가 대비 SPLIT_BUY_TRIGGER_PCT(+0.3%) 이상 상승 확인 시
+            나머지 예산(40%)으로 추가 매수
 
 환경변수:
-  AUTO_TRADE_ENABLED    : true/false (기본 true)
-  MAX_AMOUNT_PER_STOCK  : 종목당 최대 투자금액 (기본 300000원)
-  SPLIT_BUY_ENABLED     : true/false — 분할매수 활성화 (기본 true)
-  SPLIT_BUY_RATIO       : 1차 매수 비율 0.0~1.0 (기본 0.5 = 50%)
-  SPLIT_BUY_TRIGGER_PCT : 2차 매수 트리거 상승률 (기본 0.005 = +0.5%)
-  SPLIT_BUY_MIN_MINUTES : 2차 매수 최소 대기 시간 분 (기본 10)
-  SPLIT_BUY_MAX_MINUTES : 2차 매수 유효 기간 분 — 초과 시 포기 (기본 60)
+  AUTO_TRADE_ENABLED      : true/false (기본 true)
+  MAX_AMOUNT_PER_STOCK    : 종목당 최대 투자금액 (기본 300000원)
+  SPLIT_BUY_ENABLED       : true/false — 분할매수 활성화 (기본 true)
+  SPLIT_BUY_RATIO         : 1차 매수 비율 0.0~1.0 (기본 0.6 = 60%)
+  SPLIT_BUY_TRIGGER_PCT   : 2차 매수 트리거 상승률 (기본 0.003 = +0.3%)
+  SPLIT_BUY_MIN_MINUTES   : 2차 매수 최소 대기 시간 분 (기본 5)
+  SPLIT_BUY_MAX_MINUTES   : 2차 매수 유효 기간 분 — 초과 시 포기 (기본 30)
+  MAX_PHASE2_RISE_PCT     : 2차 매수 최대 허용 상승률 — 급등 보호 (기본 0.03 = +3%)
+                            1차 매수가 대비 이 이상 올랐으면 2차 매수 포기
 """
 import logging
 import os
@@ -36,11 +38,12 @@ MAX_AMOUNT_PER_STOCK  = int(os.getenv("MAX_AMOUNT_PER_STOCK", "300000"))
 TARGET_PROFIT_PCT     = float(os.getenv("TARGET_PROFIT_PCT",  "0.05"))
 STOP_LOSS_PCT         = float(os.getenv("STOP_LOSS_PCT",      "-0.02"))
 
-SPLIT_BUY_ENABLED     = os.getenv("SPLIT_BUY_ENABLED",     "true").lower() == "true"
-SPLIT_BUY_RATIO       = float(os.getenv("SPLIT_BUY_RATIO",       "0.5"))   # 1차 매수 비율
-SPLIT_BUY_TRIGGER_PCT = float(os.getenv("SPLIT_BUY_TRIGGER_PCT", "0.005")) # 2차 트리거 +0.5%
-SPLIT_BUY_MIN_MINUTES = int(os.getenv("SPLIT_BUY_MIN_MINUTES",   "10"))    # 최소 대기
-SPLIT_BUY_MAX_MINUTES = int(os.getenv("SPLIT_BUY_MAX_MINUTES",   "60"))    # 최대 유효기간
+SPLIT_BUY_ENABLED      = os.getenv("SPLIT_BUY_ENABLED",      "true").lower() == "true"
+SPLIT_BUY_RATIO        = float(os.getenv("SPLIT_BUY_RATIO",        "0.6"))   # 1차 매수 비율 (실전 권장 60%)
+SPLIT_BUY_TRIGGER_PCT  = float(os.getenv("SPLIT_BUY_TRIGGER_PCT",  "0.003")) # 2차 트리거 +0.3% (빠른 대응)
+SPLIT_BUY_MIN_MINUTES  = int(os.getenv("SPLIT_BUY_MIN_MINUTES",    "5"))     # 최소 대기 5분 (빠른 대응)
+SPLIT_BUY_MAX_MINUTES  = int(os.getenv("SPLIT_BUY_MAX_MINUTES",    "30"))    # 최대 유효기간 30분
+MAX_PHASE2_RISE_PCT    = float(os.getenv("MAX_PHASE2_RISE_PCT",    "0.03"))  # 2차 매수 급등 보호 +3%
 
 
 def calc_quantity(price: float, max_amount: int) -> int:
@@ -366,6 +369,16 @@ async def check_and_execute_phase2(db: AsyncSession) -> list[dict]:
             )
             continue
 
+        # ── 조건 ①: 급등 보호 — 최대 상승률 초과 시 2차 매수 포기 ─────────
+        max_rise_price = t1.price * (1 + MAX_PHASE2_RISE_PCT)
+        if current_price > max_rise_price:
+            logger.info(
+                f"[{t1.code}] 2차 매수 포기: 급등 감지 "
+                f"현재가 {current_price:,} > 급등보호 상한 {max_rise_price:,.0f} "
+                f"(+{MAX_PHASE2_RISE_PCT*100:.0f}% 초과)"
+            )
+            continue
+
         # ── 조건 3: 목표가 너무 근접하지 않음 ────────────────────────────
         near_target = t1.price * (1 + TARGET_PROFIT_PCT) * 0.9
         if current_price >= near_target:
@@ -394,7 +407,12 @@ async def check_and_execute_phase2(db: AsyncSession) -> list[dict]:
             parent_trade_id=t1.id,
         )
 
+        # ── ② 2차 매수 실패 로그 추가 ─────────────────────────────────────
         if not trade_data:
+            logger.warning(
+                f"[{t1.code}] {t1.name} 2차 매수 실패 "
+                f"(1차 매수가: {t1.price:,}원, 현재가: {current_price:,}원)"
+            )
             continue
 
         await db.commit()
@@ -412,6 +430,7 @@ async def check_and_execute_phase2(db: AsyncSession) -> list[dict]:
             f"━━━━━━━━━━━━━━━━━━\n"
             f"📌 종목: <b>{t1.name} ({t1.code})</b>\n"
             f"💰 2차 매수가: {current_price:,}원\n"
+            f"📈 1차 대비: +{(current_price/t1.price-1)*100:.2f}%\n"
             f"🔢 2차 수량: {trade_data['quantity']}주\n"
             f"💵 2차 금액: {trade_data['amount']:,}원\n"
             f"━━━━━━━━━━━━━━━━━━\n"
