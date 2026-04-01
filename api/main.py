@@ -2,17 +2,18 @@
 AI INVEST – FastAPI 메인 앱
 """
 import logging
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, and_
 
 from api.database import get_db, init_db, AsyncSessionLocal
 from api.models import Signal, Trade
 
 from collector.service import (
-    CollectorService,
     sync_stock_master,
     collect_daily_ohlcv,
 )
@@ -28,6 +29,7 @@ from notification.service import (
 from ai.service import analyze_signal, analyze_all_new_signals
 from trader.service import execute_order, check_stop_loss
 from trader.kis_client import get_balance, get_current_price, IS_MOCK
+from trader import kis_client as kis
 from scheduler.service import create_scheduler
 from backtest.service import run_backtest, run_multi_backtest
 from strategy.extended import run_extended_strategy
@@ -48,8 +50,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── 백그라운드 서비스 ─────────────────────────────────────────────────────────
-collector_service = CollectorService(db_factory=AsyncSessionLocal)
-rt_monitor        = RealTimeMonitor(db_factory=AsyncSessionLocal)
+# CollectorService 제거 — 스케줄러(하루 6회)가 수집을 담당
+# 이중 수집 시 9분 소요 → 손절 체크 SKIP 문제 방지
+rt_monitor = RealTimeMonitor(db_factory=AsyncSessionLocal)
 
 
 @asynccontextmanager
@@ -57,8 +60,8 @@ async def lifespan(app: FastAPI):
     logger.info("AI INVEST 서버 시작 중...")
     await init_db()
     logger.info("DB 초기화 완료")
-    await collector_service.start()
 
+    # CollectorService.start() 제거 — 스케줄러와 이중 수집 방지
     scheduler = create_scheduler()
     scheduler.start()
     logger.info("스케줄러 시작 완료")
@@ -71,7 +74,6 @@ async def lifespan(app: FastAPI):
 
     await rt_monitor.stop()
     scheduler.shutdown(wait=False)
-    await collector_service.stop()
     logger.info("AI INVEST 서버 종료")
 
 
@@ -170,7 +172,6 @@ async def list_signals(
 
 @app.get("/signals/{signal_id}", tags=["Strategy"])
 async def get_signal_detail(signal_id: str, db: AsyncSession = Depends(get_db)):
-    from sqlalchemy import select
     stmt = select(Signal).where(Signal.id == signal_id)
     row  = (await db.execute(stmt)).scalars().first()
     if not row:
@@ -222,70 +223,74 @@ async def emergency_close_all(
             "example": "/trade/emergency-close-all?confirm=true",
         }
 
-    from sqlalchemy import select, and_
-    from trader.order_manager import place_sell_order
-
-    # 보유 중인 BUY 포지션 조회
-    stmt = (
-        select(Trade)
-        .where(and_(
-            Trade.order_type == "BUY",
-            Trade.status.in_(["FILLED", "PARTIAL"]),
-        ))
-    )
+    stmt = select(Trade).where(and_(
+        Trade.order_type == "BUY",
+        Trade.status.in_(["FILLED", "PARTIAL"]),
+    ))
     buy_trades = (await db.execute(stmt)).scalars().all()
 
-    closed  = []
-    failed  = []
+    closed, failed = [], []
 
     for trade in buy_trades:
-        # 이미 매도된 포지션 제외
+        # 이미 청산된 포지션 제외
         sold = (await db.execute(
             select(Trade).where(and_(
-                Trade.code == trade.code,
-                Trade.order_type == "SELL",
                 Trade.signal_id == trade.signal_id,
+                Trade.order_type == "SELL",
+                Trade.status == "FILLED",
             ))
         )).scalars().first()
         if sold:
             continue
 
-        result = await place_sell_order(
-            db, trade,
-            reason="긴급 전체 청산 (수동 실행)"
-        )
+        try:
+            price_data    = await kis.get_current_price(trade.code)
+            current_price = price_data["price"]
+            result        = await kis.sell_order(trade.code, trade.quantity, order_type="01")
 
-        if result.get("success"):
-            closed.append({
-                "code":       trade.code,
-                "name":       trade.name,
-                "quantity":   trade.quantity,
-                "sell_price": result.get("sell_price", 0),
-                "net_profit": result.get("net_profit", 0),
-            })
-        else:
-            failed.append({
-                "code":   trade.code,
-                "name":   trade.name,
-                "reason": result.get("reason", "알 수 없음"),
-            })
+            status = "FILLED" if result["success"] else "FAILED"
+            await db.execute(Trade.__table__.insert().values(
+                id=str(uuid.uuid4()),
+                signal_id=trade.signal_id,
+                code=trade.code,
+                name=trade.name,
+                order_type="SELL",
+                price=current_price,
+                quantity=trade.quantity,
+                amount=current_price * trade.quantity,
+                status=status,
+                broker_order_id=result.get("order_no", ""),
+                is_simulation=trade.is_simulation,
+            ))
+            await db.commit()
 
-    # 텔레그램 알림
+            if result["success"]:
+                pnl = (current_price - trade.price) * trade.quantity
+                closed.append({
+                    "code":       trade.code,
+                    "name":       trade.name,
+                    "quantity":   trade.quantity,
+                    "net_profit": pnl,
+                })
+            else:
+                failed.append({"code": trade.code, "name": trade.name, "reason": "주문 실패"})
+
+        except Exception as e:
+            logger.error(f"긴급청산 실패 [{trade.code}]: {repr(e)}")
+            failed.append({"code": trade.code, "name": trade.name, "reason": repr(e)})
+
     await send_message(
         f"🚨 <b>[AI INVEST] 긴급 전체 청산 실행</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"✅ 성공: {len(closed)}건\n"
         f"❌ 실패: {len(failed)}건\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        + "\n".join([
-            f"• {c['name']} ({c['code']}) "
-            f"{c['net_profit']:+,}원"
+        + ("\n" + "\n".join([
+            f"• {c['name']} ({c['code']}) {c['net_profit']:+,.0f}원"
             for c in closed
-        ])
+        ]) if closed else "")
     )
 
     logger.warning(f"긴급 전체 청산: 성공 {len(closed)}건 / 실패 {len(failed)}건")
-
     return {
         "message": f"긴급 청산 완료: 성공 {len(closed)}건 / 실패 {len(failed)}건",
         "closed":  closed,
@@ -355,9 +360,12 @@ async def calc_order_size(
     qty    = calc_quantity_by_budget(strategy, price, confidence)
     amount = get_order_amount(strategy, confidence)
     return {
-        "strategy": strategy, "price": price,
-        "confidence": confidence, "quantity": qty,
-        "amount": amount, "total_cost": qty * price,
+        "strategy":   strategy,
+        "price":      price,
+        "confidence": confidence,
+        "quantity":   qty,
+        "amount":     amount,
+        "total_cost": qty * price,
     }
 
 
@@ -457,23 +465,26 @@ async def notification_test():
 
 @app.post("/notification/signal/{signal_id}", tags=["Notification"])
 async def notify_signal_by_id(signal_id: str, db: AsyncSession = Depends(get_db)):
-    from sqlalchemy import select
     stmt = select(Signal).where(Signal.id == signal_id)
     row  = (await db.execute(stmt)).scalars().first()
     if not row:
         raise HTTPException(status_code=404, detail="신호를 찾을 수 없습니다")
     sig = {
-        "code": row.code, "name": row.name,
-        "signal_type": row.signal_type, "strategy": row.strategy,
-        "price": row.price, "target_price": row.target_price,
-        "stop_loss": row.stop_loss, "reason": row.reason,
-        "confidence": row.confidence,
+        "code":         row.code,
+        "name":         row.name,
+        "signal_type":  row.signal_type,
+        "strategy":     row.strategy,
+        "price":        row.price,
+        "target_price": row.target_price,
+        "stop_loss":    row.stop_loss,
+        "reason":       row.reason,
+        "confidence":   row.confidence,
     }
     ok = await notify_signal(sig)
     return {"message": "전송 완료" if ok else "전송 실패"}
 
 
-# ── Trade 엔드포인트 ───────────────────────────────────────────────────────────
+# ── Trade 엔드포인트 ──────────────────────────────────────────────────────────
 @app.post("/trade/order", tags=["Trade"])
 async def create_order(
     signal_id: str,
@@ -518,10 +529,9 @@ async def list_trades(
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
-    from sqlalchemy import select, desc
     stmt = (
         select(Trade)
-        .order_by(desc(Trade.created_at))
+        .order_by(Trade.created_at.desc())
         .limit(limit)
     )
     rows = (await db.execute(stmt)).scalars().all()
