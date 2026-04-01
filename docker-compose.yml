@@ -45,38 +45,68 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://aiinvest:aiinvest@postgres:5432/aiinvest
       REDIS_URL: redis://redis:6379/0
+      # ── 텔레그램 ───────────────────────────────────────────
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+
+      # ── Claude AI ──────────────────────────────────────────
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+      # ── KIS API ────────────────────────────────────────────
       KIS_APP_KEY: ${KIS_APP_KEY:-}
       KIS_APP_SECRET: ${KIS_APP_SECRET:-}
       KIS_ACCOUNT_NO: ${KIS_ACCOUNT_NO:-}
       KIS_MOCK: ${KIS_MOCK:-true}
-      STOP_LOSS_PCT: ${STOP_LOSS_PCT:--0.02}
-      TARGET_PROFIT_PCT: ${TARGET_PROFIT_PCT:-0.03}
+
+      # ── 거래 모드 (쌍으로 변경) ────────────────────────────
+      # 모의: SIMULATION_MODE=true  / LIVE_MODE=false
+      # 실전: SIMULATION_MODE=false / LIVE_MODE=true
+      SIMULATION_MODE: ${SIMULATION_MODE:-true}
+      LIVE_MODE: ${LIVE_MODE:-false}
+
+      # ── 자금 배분 ───────────────────────────────────────────
       TOTAL_BUDGET: ${TOTAL_BUDGET:-5000000}
       ALLOC_BREAKOUT: ${ALLOC_BREAKOUT:-0.40}
       ALLOC_MA_CROSS: ${ALLOC_MA_CROSS:-0.30}
       ALLOC_RSI_REVERSAL: ${ALLOC_RSI_REVERSAL:-0.20}
       ALLOC_MACD: ${ALLOC_MACD:-0.10}
       MAX_SINGLE_TRADE_PCT: ${MAX_SINGLE_TRADE_PCT:-0.20}
+
+      # ── 자동 매매 기본 ─────────────────────────────────────
       AUTO_TRADE_ENABLED: ${AUTO_TRADE_ENABLED:-true}
       MAX_AMOUNT_PER_STOCK: ${MAX_AMOUNT_PER_STOCK:-300000}
-      # ── 분할매수 ──────────────────────────────────────────
+      TARGET_PROFIT_PCT: ${TARGET_PROFIT_PCT:-0.03}
+      STOP_LOSS_PCT: ${STOP_LOSS_PCT:--0.02}
+      HARD_STOP_PCT: ${HARD_STOP_PCT:--0.03}
+      MAX_HOLD_DAYS: ${MAX_HOLD_DAYS:-3}
+
+      # ── 분할매수 ───────────────────────────────────────────
       SPLIT_BUY_ENABLED: ${SPLIT_BUY_ENABLED:-true}
       SPLIT_BUY_RATIO: ${SPLIT_BUY_RATIO:-0.6}
       SPLIT_BUY_TRIGGER_PCT: ${SPLIT_BUY_TRIGGER_PCT:-0.003}
       SPLIT_BUY_MIN_MINUTES: ${SPLIT_BUY_MIN_MINUTES:-5}
       SPLIT_BUY_MAX_MINUTES: ${SPLIT_BUY_MAX_MINUTES:-30}
       MAX_PHASE2_RISE_PCT: ${MAX_PHASE2_RISE_PCT:-0.03}
+
       # ── 리스크 관리 ────────────────────────────────────────
-      SIMULATION_MODE: ${SIMULATION_MODE:-true}
-      LIVE_MODE: ${LIVE_MODE:-false}
-      HARD_STOP_PCT: ${HARD_STOP_PCT:--0.03}
-      BLACKLIST_DAYS: ${BLACKLIST_DAYS:-3}
       DAILY_LOSS_LIMIT: ${DAILY_LOSS_LIMIT:-30000}
       MAX_POSITIONS: ${MAX_POSITIONS:-5}
+      BLACKLIST_DAYS: ${BLACKLIST_DAYS:-3}
 
+      # ── 과매매 방지 ────────────────────────────────────────
+      MAX_DAILY_TRADES: ${MAX_DAILY_TRADES:-10}
+      REENTRY_MINUTES: ${REENTRY_MINUTES:-60}
+      STOP_REENTRY_MINUTES: ${STOP_REENTRY_MINUTES:-30}
+      COOLTIME_HOURS: ${COOLTIME_HOURS:-24}
+
+      # ── 시장 & 시세 수집 ───────────────────────────────────
+      COLLECT_LIMIT: ${COLLECT_LIMIT:-0}
+      MARKET_FILTER_DAYS: ${MARKET_FILTER_DAYS:-5}
+      BREAKOUT_DAYS: ${BREAKOUT_DAYS:-20}
+      VOLUME_MULTIPLIER: ${VOLUME_MULTIPLIER:-2.0}
+      MIN_CHANGE_RATE: ${MIN_CHANGE_RATE:-2.0}
+
+      # ── 신호 필터 ──────────────────────────────────────────
       MIN_CONFIDENCE: ${MIN_CONFIDENCE:-0.55}
       RSI_MIN: ${RSI_MIN:-45}
       RSI_MAX: ${RSI_MAX:-78}
@@ -84,9 +114,6 @@ services:
       FILTER_MACD_ENABLED: ${FILTER_MACD_ENABLED:-true}
       FILTER_MA_ENABLED: ${FILTER_MA_ENABLED:-true}
       FILTER_BB_ENABLED: ${FILTER_BB_ENABLED:-true}
-      MIN_CHANGE_RATE: ${MIN_CHANGE_RATE:-2.0}
-      BREAKOUT_DAYS: ${BREAKOUT_DAYS:-20}
-      VOLUME_MULTIPLIER: ${VOLUME_MULTIPLIER:-2.0}
     ports:
       - "8000:8000"
     volumes:
