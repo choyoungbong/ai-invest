@@ -71,6 +71,7 @@ services:
       MAX_PHASE2_RISE_PCT: ${MAX_PHASE2_RISE_PCT:-0.03}
       # ── 리스크 관리 ────────────────────────────────────────
       SIMULATION_MODE: ${SIMULATION_MODE:-true}
+      LIVE_MODE: ${LIVE_MODE:-false}
       HARD_STOP_PCT: ${HARD_STOP_PCT:--0.03}
       BLACKLIST_DAYS: ${BLACKLIST_DAYS:-3}
       DAILY_LOSS_LIMIT: ${DAILY_LOSS_LIMIT:-30000}
