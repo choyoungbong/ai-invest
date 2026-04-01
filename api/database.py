@@ -53,8 +53,8 @@ if IS_SERVERLESS:
     logger.info("DB: Serverless 모드 — NullPool 사용")
 else:
     _engine_kwargs.update({
-        "pool_size":         5,
-        "max_overflow":      10,
+        "pool_size":         10,
+        "max_overflow":      20,
         "pool_timeout":      30,
         "pool_recycle":      1800,   # 30분마다 연결 재생성
         "connect_args": {
