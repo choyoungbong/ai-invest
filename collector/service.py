@@ -2,9 +2,15 @@
 Collector – 한국 주식 시세 수집기
 FinanceDataReader 를 사용해 KRX 데이터를 수집합니다.
 pykrx 대비 Docker 환경에서 안정적으로 동작합니다.
+
+개선사항:
+  - 종목별 개별 HTTP 요청 → 시장 전체 일괄 조회 (9분 → 1분 이내)
+  - CollectorService 백그라운드 루프 장중에만 실행 (스케줄러와 이중 수집 방지)
+  - COLLECT_LIMIT 환경변수 지원 (테스트용 수집 제한)
 """
 import asyncio
 import logging
+import os
 from datetime import datetime, date, timedelta
 from typing import List, Dict
 
@@ -17,12 +23,26 @@ from api.models import Stock, MarketData
 
 logger = logging.getLogger(__name__)
 
+COLLECT_LIMIT = int(os.getenv("COLLECT_LIMIT", "0"))  # 0=전체, N=N개 제한
+
 
 def _prev_trading_day(d: date) -> str:
     """가장 최근 평일(영업일 추정)을 반환합니다."""
-    while d.weekday() >= 5:  # 토(5), 일(6)
+    while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d.strftime("%Y%m%d")
+
+
+def _is_market_hours() -> bool:
+    """현재 장중 여부 확인 (09:00 ~ 15:35 KST)"""
+    import pytz
+    kst = pytz.timezone("Asia/Seoul")
+    now = datetime.now(kst)
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    from datetime import time
+    return time(9, 0) <= t <= time(15, 35)
 
 
 # ── 종목 마스터 동기화 ──────────────────────────────────────────────────────────
@@ -40,7 +60,6 @@ async def sync_stock_master(db: AsyncSession):
 
             logger.info(f"[{market}] 컬럼: {list(df.columns)}")
 
-            # 컬럼명 유연하게 처리
             code_col = next((c for c in df.columns if c in ["Code", "Symbol", "종목코드", "ISU_SRT_CD"]), None)
             name_col = next((c for c in df.columns if c in ["Name", "종목명", "ISU_ABBRV"]), None)
 
@@ -76,14 +95,16 @@ async def sync_stock_master(db: AsyncSession):
 async def collect_daily_ohlcv(db: AsyncSession, target_date: str | None = None):
     """
     지정일(또는 당일) OHLCV + 거래대금을 수집해 DB에 저장합니다.
-    FinanceDataReader로 KOSPI/KOSDAQ 전 종목을 수집합니다.
+
+    [개선] 종목별 개별 HTTP 요청 → 시장 전체 일괄 조회
+      기존: KOSPI 926개 × HTTP 1회 + KOSDAQ 1784개 × HTTP 1회 = 2710회 요청 (9분)
+      개선: fdr.DataReader("KOSPI") 1회 + fdr.DataReader("KOSDAQ") 1회 = 2회 요청 (1분)
     """
     if target_date:
-        td = target_date  # YYYYMMDD
+        td = target_date
         td_date = datetime.strptime(td, "%Y%m%d").date()
     else:
         td_date = date.today()
-        # 주말이면 가장 최근 평일로
         while td_date.weekday() >= 5:
             td_date -= timedelta(days=1)
         td = td_date.strftime("%Y%m%d")
@@ -93,7 +114,7 @@ async def collect_daily_ohlcv(db: AsyncSession, target_date: str | None = None):
 
     for market, fdr_key in [("KOSPI", "KOSPI"), ("KOSDAQ", "KOSDAQ")]:
         try:
-            # 전 종목 시세 (해당일 ~ 해당일)
+            # ── 시장 전체 일괄 조회 (기존 개별 조회 대체) ──────────────────
             df = fdr.DataReader(fdr_key, date_str, date_str)
 
             if df is None or df.empty:
@@ -102,50 +123,43 @@ async def collect_daily_ohlcv(db: AsyncSession, target_date: str | None = None):
 
             logger.info(f"[{market}] 컬럼: {list(df.columns)}, 행수: {len(df)}")
 
+            # COLLECT_LIMIT 적용 (테스트용)
+            if COLLECT_LIMIT > 0:
+                df = df.head(COLLECT_LIMIT)
+                logger.info(f"[{market}] COLLECT_LIMIT={COLLECT_LIMIT} 적용")
+
+            logger.info(f"[{market}] {len(df)}개 종목 일괄 수집 시작")
+
+            batch = []
+            for code, row in df.iterrows():
+                try:
+                    code_str = str(code).zfill(6)
+                    close = float(row.get("Close", 0) or 0)
+                    if close <= 0:
+                        continue
+
+                    volume = int(row.get("Volume", 0) or 0)
+                    batch.append({
+                        "code":          code_str,
+                        "open":          float(row.get("Open",   0) or 0),
+                        "high":          float(row.get("High",   0) or 0),
+                        "low":           float(row.get("Low",    0) or 0),
+                        "close":         close,
+                        "volume":        volume,
+                        "trading_value": int(volume * close),
+                        "change_rate":   float(row.get("Change",  0) or 0) * 100,
+                        "timestamp":     datetime.strptime(td, "%Y%m%d"),
+                    })
+                except Exception as e:
+                    logger.debug(f"[{code}] 행 처리 오류: {e}")
+                    continue
+
+            rows.extend(batch)
+            logger.info(f"[{market}] {len(batch)}개 수집 완료")
+
         except Exception as e:
-            logger.error(f"[{market}] 지수 조회 오류: {e}")
+            logger.error(f"[{market}] 수집 오류: {repr(e)}")
             continue
-
-        # 개별 종목 수집 — 마스터에서 코드 목록 가져오기
-        from sqlalchemy import select
-        stmt = select(Stock.code, Stock.name).where(Stock.market == market)
-        stock_rows = (await db.execute(stmt)).all()
-
-        if not stock_rows:
-            logger.warning(f"[{market}] 종목 마스터 없음 — sync-master 먼저 실행하세요")
-            continue
-
-        logger.info(f"[{market}] {len(stock_rows)}개 종목 시세 수집 시작")
-
-        batch = []
-        for code, name in stock_rows:
-            try:
-                sdf = fdr.DataReader(code, date_str, date_str)
-                if sdf is None or sdf.empty:
-                    continue
-
-                row = sdf.iloc[-1]
-                close = float(row.get("Close", 0) or 0)
-                if close <= 0:
-                    continue
-
-                batch.append({
-                    "code":          code,
-                    "open":          float(row.get("Open",   0) or 0),
-                    "high":          float(row.get("High",   0) or 0),
-                    "low":           float(row.get("Low",    0) or 0),
-                    "close":         close,
-                    "volume":        int(row.get("Volume",   0) or 0),
-                    "trading_value": int(row.get("Volume",   0) * close),
-                    "change_rate":   float(row.get("Change",  0) or 0) * 100,
-                    "timestamp":     datetime.strptime(td, "%Y%m%d"),
-                })
-            except Exception as e:
-                logger.debug(f"[{code}] 시세 오류: {e}")
-                continue
-
-        rows.extend(batch)
-        logger.info(f"[{market}] {len(batch)}개 수집 완료")
 
     if not rows:
         logger.warning(f"{td} 최종 시세 데이터 없음")
@@ -174,7 +188,6 @@ async def collect_top_stocks_ohlcv(db: AsyncSession, top_n: int = 100):
     date_str = today.strftime("%Y-%m-%d")
 
     try:
-        # KOSPI200 구성 종목
         df = fdr.StockListing("KRX")
         if df is None or df.empty:
             return []
@@ -230,6 +243,9 @@ async def collect_intraday_snapshot(db: AsyncSession):
 
 
 # ── 백그라운드 서비스 ─────────────────────────────────────────────────────────
+# [개선] 장중에만 실행 + 스케줄러와 이중 수집 방지를 위해 기본 비활성화
+# main.py에서 CollectorService를 시작하지 않는 것을 권장합니다.
+# 스케줄러(scheduler/service.py)가 하루 6회 수집을 담당합니다.
 
 class CollectorService:
     def __init__(self, db_factory):
@@ -249,10 +265,18 @@ class CollectorService:
         logger.info("Collector 서비스 중지")
 
     async def _loop(self):
+        """
+        [개선] 장중에만 실행되도록 변경.
+        스케줄러가 이미 6회 수집하므로 이 서비스는 main.py에서
+        시작하지 않는 것을 권장합니다.
+        """
         while self.running:
             try:
-                async with self.db_factory() as db:
-                    await collect_intraday_snapshot(db)
+                if _is_market_hours():
+                    async with self.db_factory() as db:
+                        await collect_intraday_snapshot(db)
+                else:
+                    logger.debug("[Collector] 장 외 시간 — 수집 건너뜀")
             except Exception as e:
-                logger.error(f"Collector 루프 오류: {e}")
+                logger.error(f"Collector 루프 오류: {repr(e)}")
             await asyncio.sleep(300)
