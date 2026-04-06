@@ -134,6 +134,10 @@ async def collect_daily_ohlcv(db: AsyncSession, target_date: str | None = None):
             for code, row in df.iterrows():
                 try:
                     code_str = str(code).zfill(6)
+                    # 6자리 숫자가 아니면 건너뜀
+                    if not code_str.isdigit() or len(code_str) != 6:
+                        continue
+                      
                     close = float(row.get("Close", 0) or 0)
                     if close <= 0:
                         continue
