@@ -114,6 +114,9 @@ services:
       FILTER_MACD_ENABLED: ${FILTER_MACD_ENABLED:-true}
       FILTER_MA_ENABLED: ${FILTER_MA_ENABLED:-true}
       FILTER_BB_ENABLED: ${FILTER_BB_ENABLED:-true}
+
+      SLIPPAGE_LIMIT_PCT: ${SLIPPAGE_LIMIT_PCT:-0.005}
+      
     ports:
       - "8000:8000"
     volumes:
