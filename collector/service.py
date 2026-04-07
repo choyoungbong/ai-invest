@@ -103,8 +103,12 @@ async def collect_daily_ohlcv(db: AsyncSession, target_date: str | None = None):
     if target_date:
         td = target_date
         td_date = datetime.strptime(td, "%Y%m%d").date()
+    # 수정 — 장 시작 직후(09:05~09:30) 오늘 데이터 없으면 전날 사용
     else:
-        td_date = date.today()
+        import pytz
+        kst = pytz.timezone("Asia/Seoul")
+        now_kst = datetime.now(kst)
+        td_date = now_kst.date()
         while td_date.weekday() >= 5:
             td_date -= timedelta(days=1)
         td = td_date.strftime("%Y%m%d")
@@ -165,8 +169,17 @@ async def collect_daily_ohlcv(db: AsyncSession, target_date: str | None = None):
             logger.error(f"[{market}] 수집 오류: {repr(e)}")
             continue
 
+    # 수정 — 오늘 데이터 없으면 전날 DB 데이터로 대체
     if not rows:
-        logger.warning(f"{td} 최종 시세 데이터 없음")
+        logger.warning(f"{td} 최종 시세 데이터 없음 — 전날 데이터 사용")
+        from sqlalchemy import select, func
+        prev_ts = (await db.execute(
+            select(func.max(MarketData.timestamp)).where(
+                MarketData.timestamp < datetime.strptime(td, "%Y%m%d")
+            )
+        )).scalar()
+        if prev_ts:
+            logger.info(f"전날 데이터 사용: {prev_ts.date()}")
         return []
 
     # 중복 방지: 같은 날짜 삭제 후 재삽입
