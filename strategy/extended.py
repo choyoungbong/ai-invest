@@ -9,6 +9,8 @@ Strategy Extensions – 추가 전략 모듈
 """
 import logging
 import uuid
+import os
+
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -272,9 +274,24 @@ async def run_extended_strategy(
                 logger.error(f"전략 오류 [{strat_name}][{code}]: {e}")
                 continue
 
+            # 수정 — KIS 실시간 현재가로 신호 가격 업데이트
             if sig is None:
                 continue
-
+            
+            # 실시간 현재가로 가격 보정
+            try:
+                from trader import kis_client as kis
+                price_data    = await kis.get_current_price(code)
+                current_price = price_data.get("price", 0)
+                if current_price > 0:
+                    old_price = sig["price"]
+                    sig["price"]        = current_price
+                    sig["target_price"] = round(current_price * (1 + float(os.getenv("TARGET_PROFIT_PCT", "0.05"))))
+                    sig["stop_loss"]    = round(current_price * (1 + float(os.getenv("STOP_LOSS_PCT", "-0.02"))))
+                    logger.info(f"신호 가격 보정: {code} {old_price:,} → {current_price:,}")
+            except Exception as e:
+                logger.warning(f"[{code}] 실시간 가격 조회 실패, DB 가격 사용: {e}")
+            
             signal_id = str(uuid.uuid4())
             await db.execute(
                 Signal.__table__.insert().values(id=signal_id, **sig)
