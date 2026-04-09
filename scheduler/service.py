@@ -2,19 +2,22 @@
 Scheduler – 자동 실행 스케줄러
 
 스케줄 (KST 기준):
-  08:50                             – 종목 마스터 동기화
+  08:50          – 종목 마스터 동기화
   09:05, 10:00, 11:00, 13:00, 14:00, 15:10
-                                    – 시세수집 + 메인전략 + 확장전략 + AI + 매수
-  장중 5분마다                        – 손절/익절 체크 (빠른 반응)
-  장중 10분마다                       – 2차 분할매수 체크
-  15:40                             – 일일 리포트
-  매주 금요일 16:00                   – 주간 리포트
-  매시 정각                           – 헬스체크
+                 – 시세수집 + 전략 + AI + 매수 (풀 실행)
+  09:30, 10:30, 11:30, 13:30, 14:30
+                 – 수집 없이 스캔+전략+매수만 (빠른 실행, 10초 이내)
+  장중 5분마다   – 손절/익절 체크
+  장중 10분마다  – 2차 분할매수 체크
+  15:40          – 일일 리포트
+  매주 금요일 16:00 – 주간 리포트
+  매시 정각      – 헬스체크
 
-개선사항 (v2):
-  ✅ 분할매수 2차 체크 스케줄 추가 (10분마다)
-  ✅ 확장 전략(MA/RSI/MACD) 자동 실행 연동
-  ✅ 신호 없음 알림 하루 1회로 축소 (중복 발송 방지)
+개선사항 (v3):
+  ✅ 수집(collect)과 스캔(scan)을 분리
+  ✅ 30분 간격 빠른 스캔 추가 (총 11회 → 기회 2배)
+  ✅ 빠른 스캔은 DB 기존 시세로 전략 실행 (10초 이내 완료)
+  ✅ 신호 없음 알림 하루 1회로 축소
 """
 import logging
 from datetime import datetime
@@ -41,91 +44,117 @@ KST = pytz.timezone("Asia/Seoul")
 _no_signal_alerted_date = None
 
 
-# ── 개별 작업 ──────────────────────────────────────────────────────────────────
+# ── 공통 전략 실행 함수 ────────────────────────────────────────────────────────
 
-async def job_sync_master():
-    """종목 마스터 동기화"""
-    logger.info("[스케줄러] 종목 마스터 동기화 시작")
-    async with AsyncSessionLocal() as db:
-        await sync_stock_master(db)
-    logger.info("[스케줄러] 종목 마스터 동기화 완료")
-
-
-async def job_collect_and_run():
+async def _run_strategy_and_trade(db, now_str: str) -> tuple[list, list]:
     """
-    시세 수집 → 스캔 → 메인전략 + 확장전략 → AI → 알림 → 매수 → 기간만료 청산
-
-    [개선] 확장 전략(MA크로스/RSI반등/MACD) 자동 실행 연동
-    [개선] 신호 없음 알림 하루 1회로 축소
+    스캔 → 메인전략 + 확장전략 → AI → 매수 공통 로직.
+    수집(collect) 여부와 무관하게 재사용.
     """
     global _no_signal_alerted_date
 
+    candidates   = await run_scanner(db, top_n=30)
+    main_signals = await run_strategy(db, candidates)
+
+    try:
+        from strategy.extended import run_extended_strategy
+        ext_signals = await run_extended_strategy(db, candidates)
+    except Exception as e:
+        logger.warning(f"확장 전략 실행 오류: {e}")
+        ext_signals = []
+
+    seen_codes  = {s["code"] for s in main_signals}
+    ext_unique  = [s for s in ext_signals if s["code"] not in seen_codes]
+    all_signals = main_signals + ext_unique
+
+    if all_signals:
+        await analyze_all_new_signals(db)
+
+    # 신호 없음 알림 — 하루 1회만
+    today_kst = datetime.now(KST).date()
+    if all_signals:
+        _no_signal_alerted_date = None
+        await _notify_signals_summary(all_signals, main_signals, ext_unique)
+    else:
+        if _no_signal_alerted_date != today_kst:
+            _no_signal_alerted_date = today_kst
+            await send_message(
+                f"📭 <b>[AI INVEST] 오늘 첫 스캔 — 신호 없음</b>\n"
+                f"시각: {now_str}\n"
+                f"후속 스캔 결과는 신호 발생 시에만 알림 발송됩니다."
+            )
+        else:
+            logger.info(f"[스케줄러] {now_str} 신호 없음 — 알림 생략")
+
+    orders = []
+    if all_signals:
+        filtered = await filter_signals(db, all_signals)
+        orders   = await auto_execute_signals(db, filtered)
+
+    return all_signals, orders
+
+
+# ── 풀 실행 (수집 + 전략 + 매수) ──────────────────────────────────────────────
+
+async def job_collect_and_run():
+    """
+    [풀 실행] 시세 수집 → 스캔 → 전략 → AI → 매수 → 기간만료 청산
+    하루 6회: 09:05, 10:00, 11:00, 13:00, 14:00, 15:10
+    """
     now     = datetime.now(KST)
     now_str = now.strftime("%H:%M")
-    logger.info(f"[스케줄러] {now_str} 자동 실행 시작")
+    logger.info(f"[스케줄러] {now_str} 풀 실행 시작")
 
-    all_signals = []
-    orders      = []
+    all_signals, orders = [], []
 
     try:
         async with AsyncSessionLocal() as db:
             await collect_daily_ohlcv(db)
-            candidates = await run_scanner(db, top_n=30)
-
-            # ── 메인 전략 (돌파매매) ──────────────────────────────────────
-            main_signals = await run_strategy(db, candidates)
-
-            # ── 확장 전략 (MA크로스/RSI반등/MACD) 자동 실행 ──────────────
-            try:
-                from strategy.extended import run_extended_strategy
-                ext_signals = await run_extended_strategy(db, candidates)
-            except Exception as e:
-                logger.warning(f"확장 전략 실행 오류: {e}")
-                ext_signals = []
-
-            # 중복 코드 제거 후 합산
-            seen_codes  = {s["code"] for s in main_signals}
-            ext_unique  = [s for s in ext_signals if s["code"] not in seen_codes]
-            all_signals = main_signals + ext_unique
-
-            if all_signals:
-                await analyze_all_new_signals(db)
-
-            # ── 신호 없음 알림 억제: 하루 1회만 발송 ────────────────────
-            today_kst = now.date()
-            if all_signals:
-                _no_signal_alerted_date = None  # 신호 있으면 플래그 초기화
-                await _notify_signals_summary(all_signals, main_signals, ext_unique)
-            else:
-                if _no_signal_alerted_date != today_kst:
-                    _no_signal_alerted_date = today_kst
-                    await send_message(
-                        f"📭 <b>[AI INVEST] 오늘 첫 스캔 — 신호 없음</b>\n"
-                        f"시각: {now_str}\n"
-                        f"후속 스캔 결과는 신호 발생 시에만 알림 발송됩니다."
-                    )
-                else:
-                    logger.info(f"[스케줄러] {now_str} 신호 없음 — 알림 생략 (오늘 이미 발송)")
-
-            # ── 매수 실행 ─────────────────────────────────────────────────
-            if all_signals:
-                filtered = await filter_signals(db, all_signals)
-                orders   = await auto_execute_signals(db, filtered)
-
+            all_signals, orders = await _run_strategy_and_trade(db, now_str)
             await check_and_close_expired_positions(db)
 
     except Exception as e:
-        logger.error(f"[스케줄러] {now_str} 자동 실행 오류: {e}")
+        err_msg = repr(e) if str(e) == "" else str(e)
+        logger.error(f"[스케줄러] {now_str} 풀 실행 오류: {err_msg}", exc_info=True)
         await send_message(
             f"⚠️ <b>[AI INVEST] 스케줄러 오류</b>\n"
-            f"시각: {now_str}\n오류: {str(e)[:200]}"
+            f"시각: {now_str}\n오류: {err_msg[:200]}"
         )
 
     logger.info(
-        f"[스케줄러] {now_str} 자동 실행 완료 "
+        f"[스케줄러] {now_str} 풀 실행 완료 "
         f"— 신호 {len(all_signals)}건, 매수 {len(orders)}건"
     )
 
+
+# ── 빠른 실행 (수집 없이 스캔 + 전략 + 매수) ──────────────────────────────────
+
+async def job_scan_only():
+    """
+    [빠른 실행] 수집 없이 DB 기존 시세로 스캔+전략+매수만 실행
+    10초 이내 완료. 하루 5회: 09:30, 10:30, 11:30, 13:30, 14:30
+    """
+    now     = datetime.now(KST)
+    now_str = now.strftime("%H:%M")
+    logger.info(f"[스케줄러] {now_str} 빠른 스캔 시작")
+
+    all_signals, orders = [], []
+
+    try:
+        async with AsyncSessionLocal() as db:
+            all_signals, orders = await _run_strategy_and_trade(db, now_str)
+
+    except Exception as e:
+        err_msg = repr(e) if str(e) == "" else str(e)
+        logger.error(f"[스케줄러] {now_str} 빠른 스캔 오류: {err_msg}", exc_info=True)
+
+    logger.info(
+        f"[스케줄러] {now_str} 빠른 스캔 완료 "
+        f"— 신호 {len(all_signals)}건, 매수 {len(orders)}건"
+    )
+
+
+# ── 알림 헬퍼 ─────────────────────────────────────────────────────────────────
 
 async def _notify_signals_summary(
     all_signals: list,
@@ -135,10 +164,8 @@ async def _notify_signals_summary(
     """신호 요약 알림 (메인+확장 전략 구분)"""
     try:
         from notification.service import notify_signals_summary
-        # 기존 함수 호출 시도
         await notify_signals_summary(all_signals)
     except Exception:
-        # fallback: 직접 알림
         now_str = datetime.now(KST).strftime("%H:%M")
         lines = [f"📊 <b>[AI INVEST] 신호 발생</b> ({now_str})\n━━━━━━━━━━━━━━━━━━"]
         if main_signals:
@@ -152,11 +179,18 @@ async def _notify_signals_summary(
         await send_message("\n".join(lines))
 
 
+# ── 기타 작업 ─────────────────────────────────────────────────────────────────
+
+async def job_sync_master():
+    """종목 마스터 동기화"""
+    logger.info("[스케줄러] 종목 마스터 동기화 시작")
+    async with AsyncSessionLocal() as db:
+        await sync_stock_master(db)
+    logger.info("[스케줄러] 종목 마스터 동기화 완료")
+
+
 async def job_phase2_check():
-    """
-    2차 분할매수 조건 체크 — 장중 10분마다 실행.
-    1차 매수 후 MIN_MINUTES 경과 & 상승 추세 확인 시 2차 매수 실행.
-    """
+    """2차 분할매수 조건 체크 — 장중 10분마다"""
     try:
         async with AsyncSessionLocal() as db:
             result = await check_and_execute_phase2(db)
@@ -167,10 +201,7 @@ async def job_phase2_check():
 
 
 async def job_stop_loss_check():
-    """
-    손절/익절 체크 — 장중 5분마다 실행
-    빠른 반응으로 -2% 이내 손절 보장
-    """
+    """손절/익절 체크 — 장중 5분마다"""
     try:
         async with AsyncSessionLocal() as db:
             executed = await check_and_execute_stop_loss(db)
@@ -213,7 +244,7 @@ def create_scheduler() -> AsyncIOScheduler:
         id="sync_master", name="종목 마스터 동기화",
     )
 
-    # 장중 6회 자동 실행 (월~금)
+    # ── 풀 실행: 하루 6회 (수집 + 전략 + 매수) ───────────────────────────────
     for hour, minute in [(9, 5), (10, 0), (11, 0), (13, 0), (14, 0), (15, 10)]:
         scheduler.add_job(
             job_collect_and_run,
@@ -222,7 +253,19 @@ def create_scheduler() -> AsyncIOScheduler:
                 day_of_week="mon-fri", timezone=KST
             ),
             id=f"run_{hour:02d}{minute:02d}",
-            name=f"{hour:02d}:{minute:02d} 자동 실행",
+            name=f"{hour:02d}:{minute:02d} 풀 실행",
+        )
+
+    # ── 빠른 스캔: 하루 5회 추가 (수집 없이 전략 + 매수) ─────────────────────
+    for hour, minute in [(9, 30), (10, 30), (11, 30), (13, 30), (14, 30)]:
+        scheduler.add_job(
+            job_scan_only,
+            CronTrigger(
+                hour=hour, minute=minute,
+                day_of_week="mon-fri", timezone=KST
+            ),
+            id=f"scan_{hour:02d}{minute:02d}",
+            name=f"{hour:02d}:{minute:02d} 빠른 스캔",
         )
 
     # ── 손절/익절 체크: 5분마다 ──────────────────────────────────────────────
