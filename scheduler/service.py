@@ -245,7 +245,7 @@ def create_scheduler() -> AsyncIOScheduler:
     )
 
     # ── 풀 실행: 하루 6회 (수집 + 전략 + 매수) ───────────────────────────────
-    for hour, minute in [(9, 5), (10, 0), (11, 0), (13, 0), (14, 0), (15, 10)]:
+    for hour, minute in [(9, 5), (10, 0), (11, 0), (12, 0), (13, 0), (14, 0), (15, 10)]:
         scheduler.add_job(
             job_collect_and_run,
             CronTrigger(
@@ -257,7 +257,7 @@ def create_scheduler() -> AsyncIOScheduler:
         )
 
     # ── 빠른 스캔: 하루 5회 추가 (수집 없이 전략 + 매수) ─────────────────────
-    for hour, minute in [(9, 30), (10, 30), (11, 30), (13, 30), (14, 30)]:
+    for hour, minute in [(9, 30), (10, 30), (11, 30), (12, 30), (13, 30), (14, 30)]:
         scheduler.add_job(
             job_scan_only,
             CronTrigger(
