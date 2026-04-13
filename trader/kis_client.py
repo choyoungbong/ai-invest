@@ -245,6 +245,68 @@ async def sell_order(code: str, quantity: int, price: int = 0, order_type: str =
 
 # ── 주문 취소 ──────────────────────────────────────────────────────────────────
 
+async def get_investor_flow(code: str) -> dict:
+    """
+    주식 투자자별 매매동향 조회 (당일 최신 기준)
+    TR: FHKST01010300
+
+    Returns:
+        {
+            "foreign_net":     int,    # 외국인 순매수량 (양수=매수우위, 음수=매도우위)
+            "institution_net": int,    # 기관합계 순매수량
+            "score":           float,  # 수급 점수 0.0 ~ 1.0
+                                       #   외국인+기관 모두 매수 → 1.0
+                                       #   둘 중 하나만 매수   → 0.5
+                                       #   모두 매도           → 0.0
+        }
+    """
+    def _parse_qty(val) -> int:
+        """KIS API는 수량을 문자열로 반환. 음수/쉼표 포함 파싱."""
+        if val is None:
+            return 0
+        try:
+            return int(str(val).replace(",", "").strip() or "0")
+        except (ValueError, TypeError):
+            return 0
+
+    tr_id = "FHKST01010300"
+    url   = f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor"
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J",
+        "FID_INPUT_ISCD":         code,
+    }
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        res = await client.get(url, headers=await _headers(tr_id), params=params)
+        res.raise_for_status()
+        data = res.json()
+
+    output = data.get("output", [])
+    if not output:
+        logger.debug(f"[{code}] 투자자별 매매동향 데이터 없음")
+        return {"foreign_net": 0, "institution_net": 0, "score": 0.0}
+
+    # output[0]이 가장 최근 영업일
+    latest          = output[0]
+    foreign_net     = _parse_qty(latest.get("frgn_ntby_qty"))
+    institution_net = _parse_qty(latest.get("orgn_ntby_qty"))
+
+    # 수급 점수: 외국인/기관 각 0.5씩 기여
+    score = 0.0
+    if foreign_net     > 0: score += 0.5
+    if institution_net > 0: score += 0.5
+
+    logger.debug(
+        f"[{code}] 수급 — 외국인: {foreign_net:+,}주 / "
+        f"기관: {institution_net:+,}주 / 점수: {score:.1f}"
+    )
+    return {
+        "foreign_net":     foreign_net,
+        "institution_net": institution_net,
+        "score":           round(score, 2),
+    }
+
+
 async def cancel_order(org_order_no: str, code: str, quantity: int) -> dict:
     """
     주문 취소
