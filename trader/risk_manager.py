@@ -267,27 +267,47 @@ async def check_daily_loss(db: AsyncSession) -> tuple[bool, int]:
 
 # ── B. 동시 보유 종목 수 ───────────────────────────────────────────────────────
 
+# 수정 — code 기준 (같은 종목은 1개로 카운트)
 async def check_max_positions(db: AsyncSession) -> tuple[bool, int]:
-    """미청산 signal_id 기준으로 동시 보유 종목 수 확인"""
-    signal_ids = (await db.execute(
-        select(Trade.signal_id).where(and_(
+    """미청산 포지션을 종목(code) 기준으로 카운트"""
+    # 미청산 BUY가 있는 종목 코드 목록
+    open_codes = (await db.execute(
+        select(Trade.code).where(and_(
             Trade.order_type == "BUY",
             Trade.status.in_(["FILLED", "PARTIAL"]),
         )).distinct()
     )).scalars().all()
 
-    active = 0
-    for sid in signal_ids:
-        sold = (await db.execute(
-            select(Trade).where(and_(
-                Trade.signal_id == sid,
-                Trade.order_type == "SELL",
-                Trade.status == "FILLED",
-            ))
-        )).scalars().first()
-        if not sold:
-            active += 1
+    active_codes = []
+    for code in open_codes:
+        # 해당 종목에 SELL FILLED가 하나라도 없으면 보유 중
+        # (모든 signal의 합산으로 판단)
+        buy_sids = (await db.execute(
+            select(Trade.signal_id).where(and_(
+                Trade.code == code,
+                Trade.order_type == "BUY",
+                Trade.status.in_(["FILLED", "PARTIAL"]),
+            )).distinct()
+        )).scalars().all()
 
+        # 모든 signal_id에 SELL이 있으면 완전 청산
+        all_sold = True
+        for sid in buy_sids:
+            sold = (await db.execute(
+                select(Trade).where(and_(
+                    Trade.signal_id == sid,
+                    Trade.order_type == "SELL",
+                    Trade.status == "FILLED",
+                ))
+            )).scalars().first()
+            if not sold:
+                all_sold = False
+                break
+
+        if not all_sold:
+            active_codes.append(code)
+
+    active = len(active_codes)
     return active >= MAX_POSITIONS, active
 
 
