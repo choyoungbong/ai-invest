@@ -121,7 +121,7 @@ async def collect_today(
 # ── Scanner 엔드포인트 ────────────────────────────────────────────────────────
 @app.get("/scanner/top-volume", tags=["Scanner"])
 async def scanner_top_volume(
-    top_n: int = Query(30, ge=1, le=100),
+    top_n: int = Query(80, ge=1, le=150),
     db: AsyncSession = Depends(get_db),
 ):
     results = await get_top_volume_stocks(db, top_n=top_n)
@@ -131,7 +131,7 @@ async def scanner_top_volume(
 # ── Strategy 엔드포인트 ───────────────────────────────────────────────────────
 @app.post("/strategy/run", tags=["Strategy"])
 async def strategy_run(
-    top_n: int = Query(30, ge=1, le=100),
+    top_n: int = Query(80, ge=1, le=150),
     db: AsyncSession = Depends(get_db),
 ):
     candidates = await run_scanner(db, top_n=top_n)
@@ -398,7 +398,7 @@ async def backtest_multi(
 # ── Extended Strategy 엔드포인트 ──────────────────────────────────────────────
 @app.post("/strategy/extended", tags=["Strategy"])
 async def strategy_extended(
-    top_n:      int       = Query(30),
+    top_n: int = Query(80, ge=1, le=150),
     strategies: list[str] = Query(["ma_cross", "rsi_reversal", "macd"]),
     db: AsyncSession = Depends(get_db),
 ):
