@@ -79,6 +79,10 @@ class Signal(Base):
     atr          = Column(Float)
     vwap         = Column(Float)
     volume_spike = Column(Float)
+    # 외국인/기관 수급
+    foreign_net_buy     = Column(Integer, nullable=True)  # 외국인 순매수량 (양수=매수우위)
+    institution_net_buy = Column(Integer, nullable=True)  # 기관합계 순매수량
+    investor_score      = Column(Float,   nullable=True)  # 수급 점수 0.0~1.0
     is_executed  = Column(Boolean, default=False)
     created_at   = Column(DateTime, server_default=func.now(), index=True)
     updated_at   = Column(DateTime, server_default=func.now(), onupdate=func.now())
