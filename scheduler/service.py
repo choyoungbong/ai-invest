@@ -53,7 +53,7 @@ async def _run_strategy_and_trade(db, now_str: str) -> tuple[list, list]:
     """
     global _no_signal_alerted_date
 
-    candidates   = await run_scanner(db, top_n=30)
+    candidates   = await run_scanner(db, top_n=150)
     main_signals = await run_strategy(db, candidates)
 
     try:
@@ -89,6 +89,8 @@ async def _run_strategy_and_trade(db, now_str: str) -> tuple[list, list]:
     orders = []
     if all_signals:
         filtered = await filter_signals(db, all_signals)
+        logger.info(f"전략 신호: {len(all_signals)}")
+        logger.info(f"필터 후: {len(filtered)}")
         orders   = await auto_execute_signals(db, filtered)
 
     return all_signals, orders
@@ -235,7 +237,14 @@ async def job_weekly_report():
 # ── 스케줄러 팩토리 ────────────────────────────────────────────────────────────
 
 def create_scheduler() -> AsyncIOScheduler:
-    scheduler = AsyncIOScheduler(timezone=KST)
+    scheduler = AsyncIOScheduler(
+      timezone=KST,
+      job_defaults={
+          "coalesce": True,
+          "max_instances": 1,
+          "misfire_grace_time": 300
+      }
+    )
 
     # 08:50 종목 마스터 동기화
     scheduler.add_job(
@@ -244,7 +253,7 @@ def create_scheduler() -> AsyncIOScheduler:
         id="sync_master", name="종목 마스터 동기화",
     )
 
-    # ── 풀 실행: 하루 6회 (수집 + 전략 + 매수) ───────────────────────────────
+    # ── 풀 실행: 하루 7회 (수집 + 전략 + 매수) ───────────────────────────────
     for hour, minute in [(9, 5), (10, 0), (11, 0), (12, 0), (13, 0), (14, 0), (15, 10)]:
         scheduler.add_job(
             job_collect_and_run,
