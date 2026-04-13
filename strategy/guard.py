@@ -24,6 +24,14 @@ MAX_HOLD_DAYS      = int(os.getenv("MAX_HOLD_DAYS",   "3"))    # 최대 보유 3
 COOLTIME_HOURS     = int(os.getenv("COOLTIME_HOURS",  "24"))   # 손절 후 24시간 재매수 금지
 MARKET_FILTER_DAYS = int(os.getenv("MARKET_FILTER_DAYS", "5")) # 코스피 N일 추세 확인
 
+# ── 외국인/기관 수급 필터 파라미터 ────────────────────────────────────────────
+# ⚠️  실전에서만 의미 있는 데이터입니다.
+#     KIS_MOCK=true 환경에서는 false로 두세요.
+FILTER_INVESTOR_FLOW_ENABLED = os.getenv("FILTER_INVESTOR_FLOW_ENABLED", "false").lower() == "true"
+INVESTOR_SCORE_MIN           = float(os.getenv("INVESTOR_SCORE_MIN", "0.3"))
+#   0.3 → 외국인 or 기관 중 하나라도 순매수이면 통과 (느슨한 기준)
+#   0.8 → 외국인 + 기관 모두 순매수인 경우만 통과 (엄격한 기준)
+
 
 # ── 1. 시장 상황 필터 ─────────────────────────────────────────────────────────
 
@@ -185,6 +193,22 @@ async def check_and_close_expired_positions(db: AsyncSession) -> list[dict]:
     return closed
 
 
+# ── 3. 외국인/기관 수급 조회 (내부 헬퍼) ─────────────────────────────────────
+
+async def _get_investor_flow_safe(code: str) -> dict:
+    """
+    외국인/기관 수급 데이터를 안전하게 조회합니다.
+    API 오류 발생 시 fail-open (score=1.0) 반환 — 기존 매매에 영향 없음.
+    """
+    try:
+        from trader import kis_client as kis
+        return await kis.get_investor_flow(code)
+    except Exception as e:
+        logger.warning(f"[{code}] 수급 조회 실패 — 필터 통과 처리: {e}")
+        # fail-open: API 오류 시 해당 종목은 통과
+        return {"foreign_net": 0, "institution_net": 0, "score": 1.0}
+
+
 # ── 통합 필터 ─────────────────────────────────────────────────────────────────
 
 async def filter_signals(db: AsyncSession, signals: list[dict]) -> list[dict]:
@@ -203,17 +227,82 @@ async def filter_signals(db: AsyncSession, signals: list[dict]) -> list[dict]:
         )
         return []
 
-    # 2. 쿨타임 + 기타 필터
+    # 2. 쿨타임 필터
     filtered = []
     for sig in signals:
         code = sig["code"]
 
-        # 쿨타임 확인
         if await is_in_cooltime(db, code):
             logger.info(f"[{code}] 쿨타임 — 건너뜀")
             continue
 
         filtered.append(sig)
 
-    logger.info(f"필터 적용: {len(signals)}개 → {len(filtered)}개")
+    # 3. 외국인/기관 수급 필터 (FILTER_INVESTOR_FLOW_ENABLED=true 시 활성)
+    #    ⚠️  KIS 실전 계정에서만 의미 있는 데이터입니다.
+    #       KIS_MOCK=true 환경에서는 이 필터를 비활성화하세요.
+    if FILTER_INVESTOR_FLOW_ENABLED and filtered:
+        flow_passed  = []
+        blocked_cnt  = 0
+
+        for sig in filtered:
+            code = sig["code"]
+            flow = await _get_investor_flow_safe(code)
+
+            # ── Signal DB 레코드에 수급 데이터 기록 (분석용) ────────────────
+            try:
+                await db.execute(
+                    Signal.__table__.update()
+                    .where(Signal.id == sig["id"])
+                    .values(
+                        foreign_net_buy     = flow["foreign_net"],
+                        institution_net_buy = flow["institution_net"],
+                        investor_score      = flow["score"],
+                    )
+                )
+            except Exception as e:
+                logger.warning(f"[{code}] 수급 데이터 Signal 저장 실패 (무시): {e}")
+
+            # ── 수급 점수 기준으로 필터 ──────────────────────────────────────
+            if flow["score"] >= INVESTOR_SCORE_MIN:
+                flow_passed.append(sig)
+                logger.info(
+                    f"[{code}] ✅ 수급 통과 — "
+                    f"외국인 {flow['foreign_net']:+,}주 / "
+                    f"기관 {flow['institution_net']:+,}주 / "
+                    f"점수 {flow['score']:.1f}"
+                )
+            else:
+                blocked_cnt += 1
+                logger.info(
+                    f"[{code}] ❌ 수급 필터 탈락 — "
+                    f"외국인 {flow['foreign_net']:+,}주 / "
+                    f"기관 {flow['institution_net']:+,}주 / "
+                    f"점수 {flow['score']:.1f} < {INVESTOR_SCORE_MIN}"
+                )
+
+        # DB 변경사항 반영 (commit은 scheduler 레벨에서 처리되지만 flush로 가시성 확보)
+        try:
+            await db.flush()
+        except Exception as e:
+            logger.warning(f"수급 데이터 flush 실패 (무시): {e}")
+
+        if blocked_cnt > 0:
+            await send_message(
+                f"📊 <b>[AI INVEST] 수급 필터 적용</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🔍 검사: {len(filtered)}개 종목\n"
+                f"✅ 통과: {len(flow_passed)}개\n"
+                f"❌ 탈락: {blocked_cnt}개 (외국인·기관 매도 우위)\n"
+                f"기준: 수급점수 ≥ {INVESTOR_SCORE_MIN}"
+            )
+
+        filtered = flow_passed
+        logger.info(
+            f"수급 필터: {len(signals)}개 → 쿨타임 후 {len(filtered) + blocked_cnt}개 "
+            f"→ 수급 후 {len(filtered)}개"
+        )
+    else:
+        logger.info(f"필터 적용: {len(signals)}개 → {len(filtered)}개")
+
     return filtered
