@@ -66,28 +66,32 @@ def _phase2_amount() -> int:
     return MAX_AMOUNT_PER_STOCK - _phase1_amount()
 
 
+# 수정 — 모든 signal_id 기준으로 미청산 여부 확인
 async def _has_open_position(db: AsyncSession, code: str) -> bool:
-    """이미 해당 종목의 미청산 BUY 포지션이 존재하는지 확인"""
-    buy = (await db.execute(
+    """해당 종목의 미청산 BUY가 하나라도 있으면 True"""
+    buy_trades = (await db.execute(
         select(Trade).where(and_(
             Trade.code == code,
             Trade.order_type == "BUY",
             Trade.status == "FILLED",
         ))
-    )).scalars().first()
+    )).scalars().all()
 
-    if not buy:
+    if not buy_trades:
         return False
 
-    sell = (await db.execute(
-        select(Trade).where(and_(
-            Trade.code == code,
-            Trade.order_type == "SELL",
-            Trade.signal_id == buy.signal_id,
-        ))
-    )).scalars().first()
+    for buy in buy_trades:
+        sell = (await db.execute(
+            select(Trade).where(and_(
+                Trade.signal_id == buy.signal_id,
+                Trade.order_type == "SELL",
+                Trade.status == "FILLED",
+            ))
+        )).scalars().first()
+        if not sell:
+            return True  # 미청산 포지션 존재
 
-    return sell is None
+    return False
 
 
 async def _execute_buy(
