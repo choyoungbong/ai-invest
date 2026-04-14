@@ -213,6 +213,24 @@ async def job_stop_loss_check():
         logger.error(f"[스케줄러] 손절 체크 오류: {e}")
 
 
+async def job_force_sell_eod():
+    """장 종료 전 미청산 포지션 전량 청산"""
+    try:
+        import httpx
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                "http://localhost:8000/trade/emergency-close-all?confirm=true",
+                timeout=30
+            )
+        logger.warning(f"[스케줄러] 장 종료 전 청산 실행: {r.text[:100]}")
+        await send_message(
+            "🔔 <b>[AI INVEST] 장 종료 전 청산</b>\n"
+            "15:15 당일 미청산 포지션 전량 청산 실행"
+        )
+    except Exception as e:
+        logger.error(f"[스케줄러] 장 종료 전 청산 오류: {e}")
+      
+
 async def job_daily_report():
     """장 마감 후 일일 리포트"""
     try:
@@ -305,6 +323,14 @@ def create_scheduler() -> AsyncIOScheduler:
         name="2차 분할매수 체크 (10분)",
         max_instances=1,
         coalesce=True,
+    )
+
+    # 15:15 당일 전체 청산 (익일 보유 방지)
+    scheduler.add_job(
+        job_force_sell_eod,
+        CronTrigger(hour=15, minute=15, day_of_week="mon-fri", timezone=KST),
+        id="force_sell_eod",
+        name="15:15 당일 청산",
     )
 
     # 15:40 일일 리포트
