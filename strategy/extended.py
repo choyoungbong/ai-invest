@@ -291,6 +291,21 @@ async def run_extended_strategy(
                     logger.info(f"신호 가격 보정: {code} {old_price:,} → {current_price:,}")
             except Exception as e:
                 logger.warning(f"[{code}] 실시간 가격 조회 실패, DB 가격 사용: {e}")
+
+            # 오늘 이미 같은 종목+전략 신호가 있으면 건너뜀
+            from datetime import timezone
+            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            existing = (await db.execute(
+                select(Signal).where(and_(
+                    Signal.code == code,
+                    Signal.strategy == strat_name,
+                    Signal.created_at >= today_start,
+                ))
+            )).scalars().first()
+            
+            if existing:
+                logger.debug(f"[{code}] 오늘 이미 {strat_name} 신호 존재 — 건너뜀")
+                continue
             
             signal_id = str(uuid.uuid4())
             await db.execute(
