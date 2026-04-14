@@ -213,6 +213,63 @@ async def job_stop_loss_check():
         logger.error(f"[스케줄러] 손절 체크 오류: {e}")
 
 
+async def job_conditional_sell_eod():
+    """
+    15:10 조건부 청산
+    - 수익 +1% 미만 종목 → 당일 청산
+    - 수익 +1% 이상 종목 → 익일 보유 허용
+    """
+    from sqlalchemy import select, and_
+    from api.models import Trade
+    from trader import kis_client as kis
+    from trader.auto_stoploss import _get_open_position, _execute_sell
+
+    async with AsyncSessionLocal() as db:
+        signal_ids = (await db.execute(
+            select(Trade.signal_id).where(and_(
+                Trade.order_type == "BUY",
+                Trade.status == "FILLED",
+            )).distinct()
+        )).scalars().all()
+
+        closed, kept = [], []
+        for sid in signal_ids:
+            position = await _get_open_position(db, sid)
+            if not position:
+                continue
+
+            try:
+                price_data    = await kis.get_current_price(position["code"])
+                current_price = price_data["price"]
+            except Exception:
+                continue
+
+            profit_pct = (current_price / position["avg_buy_price"] - 1) * 100
+
+            if profit_pct >= 1.0:
+                # +1% 이상 → 익일 보유
+                kept.append(f"{position['name']} ({profit_pct:+.1f}%)")
+                logger.info(f"[{position['code']}] 익일 보유: {profit_pct:+.1f}%")
+            else:
+                # +1% 미만 → 당일 청산
+                result = await _execute_sell(
+                    db, position, current_price,
+                    f"15:10 조건부 청산 ({profit_pct:+.1f}%)"
+                )
+                if result:
+                    closed.append(f"{position['name']} ({profit_pct:+.1f}%)")
+
+        msg_lines = ["🔔 <b>[AI INVEST] 15:10 조건부 청산</b>"]
+        if closed:
+            msg_lines.append(f"📤 청산: {', '.join(closed)}")
+        if kept:
+            msg_lines.append(f"📌 익일 보유: {', '.join(kept)}")
+        if not closed and not kept:
+            msg_lines.append("보유 종목 없음")
+
+        await send_message("\n".join(msg_lines))
+
+
 async def job_force_sell_eod():
     """장 종료 전 미청산 포지션 전량 청산"""
     try:
@@ -325,13 +382,21 @@ def create_scheduler() -> AsyncIOScheduler:
         coalesce=True,
     )
 
-    # 15:15 당일 전체 청산 (익일 보유 방지)
+    # 15:10 조건부 청산
     scheduler.add_job(
-        job_force_sell_eod,
-        CronTrigger(hour=15, minute=15, day_of_week="mon-fri", timezone=KST),
-        id="force_sell_eod",
-        name="15:15 당일 청산",
+        job_conditional_sell_eod,
+        CronTrigger(hour=15, minute=10, day_of_week="mon-fri", timezone=KST),
+        id="conditional_sell_eod",
+        name="15:10 조건부 청산",
     )
+
+    # 15:15 당일 전체 청산 (익일 보유 방지)
+    #scheduler.add_job(
+    #    job_force_sell_eod,
+    #    CronTrigger(hour=15, minute=15, day_of_week="mon-fri", timezone=KST),
+    #    id="force_sell_eod",
+    #    name="15:15 당일 청산",
+    #)
 
     # 15:40 일일 리포트
     scheduler.add_job(
