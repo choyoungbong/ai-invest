@@ -430,6 +430,96 @@ def calc_net_profit(buy_price: float, sell_price: float, quantity: int) -> dict:
     }
 
 
+# ── G. KIS 실잔고 ↔ DB 포지션 싱크 ────────────────────────────────────────────
+
+async def sync_positions_with_kis(db: AsyncSession) -> dict:
+    """
+    KIS 실제 보유 잔고와 DB 미청산 포지션을 비교해 좀비 포지션을 자동 정리.
+    scheduler/service.py 에서 장 시작(09:05) / 장 종료(15:25) 시 호출 권장.
+    """
+    try:
+        from trader import kis_client as kis
+        balance = await kis.get_balance()
+        holdings = balance.get("holdings", [])
+    except Exception as e:
+        logger.error(f"[SYNC] KIS 잔고 조회 실패: {e}")
+        return {"error": str(e)}
+
+    kis_codes = {h["code"] for h in holdings}
+
+    # DB 미청산 종목 조회
+    open_codes_result = (await db.execute(
+        select(Trade.code).where(and_(
+            Trade.order_type == "BUY",
+            Trade.status.in_(["FILLED", "PARTIAL"]),
+        )).distinct()
+    )).scalars().all()
+
+    db_open_codes = set()
+    for code in open_codes_result:
+        _, active_cnt = await _check_max_positions_db(db)
+        # 실제 미청산인지 재확인
+        buy_sids = (await db.execute(
+            select(Trade.signal_id).where(and_(
+                Trade.code == code,
+                Trade.order_type == "BUY",
+                Trade.status.in_(["FILLED", "PARTIAL"]),
+            )).distinct()
+        )).scalars().all()
+
+        for sid in buy_sids:
+            sold = (await db.execute(
+                select(Trade).where(and_(
+                    Trade.signal_id == sid,
+                    Trade.order_type == "SELL",
+                    Trade.status.in_(["FILLED", "CLOSED"]),
+                ))
+            )).scalars().first()
+            if not sold:
+                db_open_codes.add(code)
+                break
+
+    # ① DB엔 보유 중 / KIS엔 없음 → 좀비 포지션 정리
+    zombie_codes = db_open_codes - kis_codes
+    fixed = []
+    for code in zombie_codes:
+        # 해당 종목의 SELL FAILED를 CLOSED로 보정
+        await db.execute(
+            Trade.__table__.update()
+            .where(and_(
+                Trade.code == code,
+                Trade.order_type == "SELL",
+                Trade.status == "FAILED",
+            ))
+            .values(status="CLOSED", notes="KIS 실잔고 기준 자동 보정")
+        )
+        await db.commit()
+        fixed.append(code)
+        logger.warning(f"[SYNC] 좀비 포지션 정리: {code} → SELL FAILED→CLOSED 보정")
+
+    # ② KIS엔 있음 / DB엔 없음 → 미추적 포지션 알림
+    untracked = kis_codes - db_open_codes
+    if untracked:
+        logger.error(f"[SYNC] 미추적 포지션 발견: {untracked}")
+
+    result = {
+        "kis_holdings":   list(kis_codes),
+        "db_open":        list(db_open_codes),
+        "zombie_fixed":   fixed,
+        "untracked":      list(untracked),
+    }
+
+    if fixed or untracked:
+        msg_lines = ["⚙️ <b>[AI INVEST] KIS-DB 포지션 싱크 완료</b>\n━━━━━━━━━━━━━━━━━━"]
+        if fixed:
+            msg_lines.append(f"✅ 좀비 정리: {', '.join(fixed)}")
+        if untracked:
+            msg_lines.append(f"⚠️ 미추적 포지션: {', '.join(untracked)} (수동 확인 필요)")
+        await send_message("\n".join(msg_lines))
+
+    return result
+  
+
 # ── 통합 매수 가능 체크 ────────────────────────────────────────────────────────
 
 async def can_buy(db: AsyncSession, code: str = "") -> tuple[bool, str]:
