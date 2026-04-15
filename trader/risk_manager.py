@@ -267,10 +267,26 @@ async def check_daily_loss(db: AsyncSession) -> tuple[bool, int]:
 
 # ── B. 동시 보유 종목 수 ───────────────────────────────────────────────────────
 
-# 수정 — code 기준 (같은 종목은 1개로 카운트)
 async def check_max_positions(db: AsyncSession) -> tuple[bool, int]:
-    """미청산 포지션을 종목(code) 기준으로 카운트"""
-    # 미청산 BUY가 있는 종목 코드 목록
+    """
+    KIS 실제 잔고 기준으로 포지션 카운트 (Primary).
+    KIS API 실패 시 DB 기반 fallback (Secondary).
+    """
+    try:
+        from trader import kis_client as kis
+        balance = await kis.get_balance()
+        holdings = balance.get("holdings", [])
+        active = len(holdings)
+        logger.debug(f"[포지션] KIS 실잔고 기준: {active}개 {[h['code'] for h in holdings]}")
+        return active >= MAX_POSITIONS, active
+
+    except Exception as e:
+        logger.warning(f"[포지션] KIS 잔고 조회 실패 → DB fallback: {e}")
+        return await _check_max_positions_db(db)
+
+
+async def _check_max_positions_db(db: AsyncSession) -> tuple[bool, int]:
+    """DB 기반 포지션 카운트 (fallback용)"""
     open_codes = (await db.execute(
         select(Trade.code).where(and_(
             Trade.order_type == "BUY",
@@ -280,8 +296,6 @@ async def check_max_positions(db: AsyncSession) -> tuple[bool, int]:
 
     active_codes = []
     for code in open_codes:
-        # 해당 종목에 SELL FILLED가 하나라도 없으면 보유 중
-        # (모든 signal의 합산으로 판단)
         buy_sids = (await db.execute(
             select(Trade.signal_id).where(and_(
                 Trade.code == code,
@@ -290,14 +304,13 @@ async def check_max_positions(db: AsyncSession) -> tuple[bool, int]:
             )).distinct()
         )).scalars().all()
 
-        # 모든 signal_id에 SELL이 있으면 완전 청산
         all_sold = True
         for sid in buy_sids:
             sold = (await db.execute(
                 select(Trade).where(and_(
                     Trade.signal_id == sid,
                     Trade.order_type == "SELL",
-                    Trade.status == "FILLED",
+                    Trade.status.in_(["FILLED", "CLOSED"]),  # CLOSED도 청산 처리
                 ))
             )).scalars().first()
             if not sold:
