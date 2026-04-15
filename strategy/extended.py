@@ -293,8 +293,8 @@ async def run_extended_strategy(
                 logger.warning(f"[{code}] 실시간 가격 조회 실패, DB 가격 사용: {e}")
 
             # 오늘 이미 같은 종목+전략 신호가 있으면 건너뜀
-            from datetime import timezone
-            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            from trader.risk_manager import _kst_today_start_utc
+            today_start = _kst_today_start_utc()
             existing = (await db.execute(
                 select(Signal).where(and_(
                     Signal.code == code,
