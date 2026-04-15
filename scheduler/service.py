@@ -126,11 +126,6 @@ async def job_collect_and_run():
     try:
         async with AsyncSessionLocal() as db:
             await collect_daily_ohlcv(db)
-
-            # ✅ 장 시작 직후 싱크
-            if now_str == "09:05":
-                await sync_positions_with_kis(db)
-          
             all_signals, orders = await _run_strategy_and_trade(db, now_str)
             await check_and_close_expired_positions(db)
 
