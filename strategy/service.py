@@ -318,9 +318,26 @@ async def run_strategy(
     """
     signals = []
 
+    # ✅ 추가: 오늘 이미 breakout 신호가 발생한 종목 목록 사전 조회 (쿼리 최소화)
+    from trader.risk_manager import _kst_today_start_utc
+    today_start_utc = _kst_today_start_utc()
+    already_today = set(
+        (await db.execute(
+            select(Signal.code).where(and_(
+                Signal.strategy == "breakout",
+                Signal.created_at >= today_start_utc,
+            ))
+        )).scalars().all()
+    )
+
     for item in candidates:
         code = item["code"]
         name = item.get("name", code)
+
+        # ✅ 추가: 오늘 이미 신호 있으면 스킵
+        if code in already_today:
+            logger.debug(f"[{code}] 오늘 breakout 신호 중복 — 건너뜀")
+            continue
 
         try:
             sig = await check_breakout(db, code, name)
@@ -355,6 +372,7 @@ async def run_strategy(
         sig["id"]         = signal_id
         sig["created_at"] = datetime.utcnow().isoformat()
         signals.append(sig)
+        already_today.add(code)  # ✅ 추가: 같은 배치 내 중복 방지
 
         logger.info(
             f"신호 발생 [{code} {name}] BUY @ {sig['price']:,.0f} "
