@@ -37,11 +37,25 @@ from trader.auto_stoploss import check_and_execute_stop_loss
 from trader.auto_trader import auto_execute_signals, check_and_execute_phase2
 from report.service import send_daily_report
 
+# ✅ 추가
+from trader.risk_manager import sync_positions_with_kis
+
 logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
 
 # 하루 1회 "신호 없음" 알림 억제 플래그
 _no_signal_alerted_date = None
+
+# ── KIS ↔ DB 포지션 싱크 ────────────────────────────────────────────
+
+async def job_sync_positions():
+    """KIS 실제 잔고 ↔ DB 포지션 싱크"""
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await sync_positions_with_kis(db)
+        logger.info(f"[스케줄러] 포지션 싱크 완료: {result}")
+    except Exception as e:
+        logger.error(f"[스케줄러] 포지션 싱크 오류: {e}")
 
 
 # ── 공통 전략 실행 함수 ────────────────────────────────────────────────────────
@@ -112,6 +126,11 @@ async def job_collect_and_run():
     try:
         async with AsyncSessionLocal() as db:
             await collect_daily_ohlcv(db)
+
+            # ✅ 장 시작 직후 싱크
+            if now_str == "09:05":
+                await sync_positions_with_kis(db)
+          
             all_signals, orders = await _run_strategy_and_trade(db, now_str)
             await check_and_close_expired_positions(db)
 
@@ -351,6 +370,20 @@ def create_scheduler() -> AsyncIOScheduler:
             id=f"scan_{hour:02d}{minute:02d}",
             name=f"{hour:02d}:{minute:02d} 빠른 스캔",
         )
+
+    # ✅ 포지션 싱크 (추가)
+    scheduler.add_job(
+        job_sync_positions,
+        CronTrigger(hour=9, minute=5, timezone=KST),
+        id="sync_positions_open"
+    )
+
+    scheduler.add_job(
+        job_sync_positions,
+        CronTrigger(hour=15, minute=25, timezone=KST),
+        id="sync_positions_close"
+    )
+  
 
     # ── 손절/익절 체크: 5분마다 ──────────────────────────────────────────────
     scheduler.add_job(
