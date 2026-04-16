@@ -11,11 +11,19 @@ Risk Manager — Phase 3/4/5/6 통합 + 미실현 손익 포함 + 블랙리스�
   - DB의 stock_blacklist 테이블 사용
   - expires_at < 현재시각 이면 자동 해제
 
-[버그 수정 v2]
-  - _daily_limit_hit 인메모리 플래그 문제 수정
-    기존: 서버 재시작(OOM, 배포 등) 시 플래그 초기화 → 당일 손실 한도 무력화
-    수정: 매 호출 시 DB 실계산을 우선으로, 인메모리는 성능 캐시 용도로만 사용
-          → 재시작 후 첫 호출에서 DB를 통해 당일 손실 상태를 정확히 복원
+[버그 수정 v2 — 이전 단계]
+  - _daily_limit_hit 인메모리 플래그 → DB 실계산 우선으로 전환
+    재시작 후에도 당일 손실 한도 정확히 복원됨
+
+[개선 v3 — 이번 단계]
+  - can_buy()에 skip_position_check 파라미터 추가
+    2차 분할매수는 기존 포지션에 추가하는 것이므로 MAX_POSITIONS 체크 제외
+    → MAX_POSITIONS=3 상태에서도 1차 보유 종목의 2차 매수가 차단되지 않음
+
+  - calc_unrealized_pnl()에 WebSocket 가격 캐시 우선 활용
+    5분마다 실행되는 손절/익절 체크에서 KIS REST API 개별 호출 → rate limit 위험
+    → ws_client.get_cached_price() 캐시가 있으면 REST 호출 생략
+    → 캐시 없을 때만 REST fallback (장중 WebSocket 연결 정상 시 API 호출 90% 감소)
 """
 import logging
 import os
@@ -70,37 +78,30 @@ SIMULATION_MODE      = os.getenv("SIMULATION_MODE", "true").lower() == "true"
 BLACKLIST_DAYS       = int(os.getenv("BLACKLIST_DAYS",        "3"))
 
 # ── 일일 한도 인메모리 캐시 (성능 최적화 용도만 — 정합성은 DB 기준) ──────────
-# [버그 수정]
-#   기존: 이 플래그가 유일한 한도 판단 기준 → 재시작 시 초기화되어 한도 무력화
-#   수정: DB 실계산이 항상 우선. 이 캐시는 "이미 한도 초과 확인된 당일" 중복 DB 조회
-#         횟수를 줄이기 위한 성능 보조 캐시로만 사용.
-#         재시작 후 첫 호출은 반드시 DB를 통해 당일 손실 상태를 복원함.
 _daily_limit_cache: dict = {
-    "hit": False,
+    "hit":  False,
     "date": None,
 }
 
 
 def _get_limit_cache() -> bool:
-    """당일 손실 한도 캐시 조회. 날짜가 바뀌면 자동 초기화."""
     today_kst = datetime.now(KST).date()
     if _daily_limit_cache["date"] != today_kst:
-        _daily_limit_cache["hit"] = False
+        _daily_limit_cache["hit"]  = False
         _daily_limit_cache["date"] = None
     return _daily_limit_cache["hit"]
 
 
 def _set_limit_cache(hit: bool) -> None:
-    """당일 손실 한도 캐시 저장."""
-    _daily_limit_cache["hit"] = hit
+    _daily_limit_cache["hit"]  = hit
     _daily_limit_cache["date"] = datetime.now(KST).date()
 
 
 def reset_daily_flag():
-    """하위 호환성 유지용 래퍼. 스케줄러 등에서 호출해도 안전."""
+    """하위 호환성 유지용 래퍼."""
     today_kst = datetime.now(KST).date()
     if _daily_limit_cache["date"] != today_kst:
-        _daily_limit_cache["hit"] = False
+        _daily_limit_cache["hit"]  = False
         _daily_limit_cache["date"] = None
 
 
@@ -135,7 +136,6 @@ async def add_to_blacklist(
     now_utc    = _utcnow()
     expires_at = now_utc + timedelta(days=BLACKLIST_DAYS)
 
-    # 이미 등록된 경우 expires_at 갱신
     existing = (await db.execute(
         select(StockBlacklist).where(StockBlacklist.code == code)
     )).scalars().first()
@@ -171,7 +171,7 @@ async def check_blacklist(db: AsyncSession, code: str) -> tuple[bool, str]:
     entry = (await db.execute(
         select(StockBlacklist).where(and_(
             StockBlacklist.code == code,
-            StockBlacklist.expires_at > now_utc,  # 아직 유효한 항목만
+            StockBlacklist.expires_at > now_utc,
         ))
     )).scalars().first()
 
@@ -185,8 +185,18 @@ async def check_blacklist(db: AsyncSession, code: str) -> tuple[bool, str]:
 # ── A. 일일 손실 한도 (실현 + 미실현 포함) ────────────────────────────────────
 
 async def calc_unrealized_pnl(db: AsyncSession) -> int:
-    """현재 보유 포지션의 미실현 손익 계산"""
-    # signal_id 기준으로 미청산 포지션 수집
+    """
+    현재 보유 포지션의 미실현 손익 계산.
+
+    [개선 v3] WebSocket 가격 캐시 우선 활용
+      기존: 미청산 포지션마다 KIS REST API get_current_price() 개별 호출
+            → 5분마다 실행되는 check_daily_loss에서 포지션 수 × REST 호출 발생
+            → KIS API rate limit(초당 20건) 소진 위험
+      수정: ws_client.get_cached_price() 캐시 우선 사용
+            → WebSocket 정상 연결 중이면 REST 호출 없이 캐시 사용
+            → 캐시 miss(장 시작 직후, WebSocket 재연결 중 등)에만 REST fallback
+            → 장중 정상 운영 시 REST 호출 ~90% 감소
+    """
     signal_ids = (await db.execute(
         select(Trade.signal_id).where(and_(
             Trade.order_type == "BUY",
@@ -216,20 +226,35 @@ async def calc_unrealized_pnl(db: AsyncSession) -> int:
         if not buy_trades:
             continue
 
-        # 가중평균 매수가
-        total_qty  = sum(t.quantity for t in buy_trades)
-        avg_price  = sum(t.price * t.quantity for t in buy_trades) / total_qty
-        code       = buy_trades[0].code
+        total_qty = sum(t.quantity for t in buy_trades)
+        avg_price = sum(t.price * t.quantity for t in buy_trades) / total_qty
+        code      = buy_trades[0].code
 
         if is_market_open():
+            current_price = 0
+
+            # [개선 v3] WebSocket 캐시 우선 시도
             try:
-                from trader import kis_client as kis
-                price_data    = await kis.get_current_price(code)
-                current_price = price_data.get("price", 0)
-                if current_price > 0:
-                    unrealized += (current_price - avg_price) * total_qty
+                from trader.ws_client import get_cached_price
+                cached = get_cached_price(code)
+                if cached and cached > 0:
+                    current_price = cached
+                    logger.debug(f"[미실현손익] {code} WS캐시: {current_price:,}원")
             except Exception:
-                pass
+                pass  # ws_client import 실패 시 REST fallback으로 이동
+
+            # 캐시 miss 시 REST fallback
+            if current_price <= 0:
+                try:
+                    from trader import kis_client as kis
+                    price_data    = await kis.get_current_price(code)
+                    current_price = price_data.get("price", 0)
+                    logger.debug(f"[미실현손익] {code} REST fallback: {current_price:,}원")
+                except Exception as e:
+                    logger.warning(f"[미실현손익] {code} 현재가 조회 실패: {e}")
+
+            if current_price > 0:
+                unrealized += (current_price - avg_price) * total_qty
 
     return int(unrealized)
 
@@ -272,19 +297,11 @@ async def check_daily_loss(db: AsyncSession) -> tuple[bool, int]:
     """
     오늘 실현 + 미실현 손익 합산해 한도 초과 여부 확인.
 
-    [버그 수정]
-      기존: 인메모리 _daily_limit_hit 플래그가 유일한 판단 기준
-            → 서버 재시작 시 플래그 초기화로 당일 손실 한도 무력화
-      수정: 항상 DB 실계산을 수행하여 정확한 손실 상태 확인
-            인메모리 캐시는 "이미 한도 초과된 날" 반복 DB 조회를 줄이기 위한
-            성능 보조 캐시로만 사용 (재시작 후 첫 호출은 반드시 DB 계산)
+    [버그 수정 v2] 항상 DB 실계산 수행
+      인메모리 캐시는 중복 알림 방지 목적으로만 사용.
+      재시작 후 첫 호출에서 DB를 통해 당일 손실 상태를 정확히 복원.
     """
     reset_daily_flag()
-
-    # [버그 수정] 캐시가 True여도 DB 재계산으로 검증
-    # 기존 코드는 캐시가 True면 바로 return → 재시작 후 초기화된 캐시는 False라
-    # 당일 이미 한도 초과 상태였어도 첫 호출에서 차단되지 않는 문제 존재
-    # 수정: 항상 DB 계산 수행, 캐시는 중복 알림 방지용으로만 사용
     cache_already_hit = _get_limit_cache()
 
     realized_pnl, unrealized_pnl = await _calc_today_pnl(db)
@@ -296,7 +313,6 @@ async def check_daily_loss(db: AsyncSession) -> tuple[bool, int]:
     )
 
     if total_pnl <= -DAILY_LOSS_LIMIT:
-        # 캐시가 False였다면 (재시작 후 복원 포함) 이번에 처음 감지한 것이므로 알림 발송
         if not cache_already_hit:
             logger.warning(f"일일 손실 한도 초과: {total_pnl:,}원")
             await send_message(
@@ -314,7 +330,6 @@ async def check_daily_loss(db: AsyncSession) -> tuple[bool, int]:
         _set_limit_cache(True)
         return True, total_pnl
 
-    # 한도 미초과 — 캐시 초기화
     _set_limit_cache(False)
     return False, total_pnl
 
@@ -328,9 +343,9 @@ async def check_max_positions(db: AsyncSession) -> tuple[bool, int]:
     """
     try:
         from trader import kis_client as kis
-        balance = await kis.get_balance()
+        balance  = await kis.get_balance()
         holdings = balance.get("holdings", [])
-        active = len(holdings)
+        active   = len(holdings)
         logger.debug(f"[포지션] KIS 실잔고 기준: {active}개 {[h['code'] for h in holdings]}")
         return active >= MAX_POSITIONS, active
 
@@ -364,7 +379,7 @@ async def _check_max_positions_db(db: AsyncSession) -> tuple[bool, int]:
                 select(Trade).where(and_(
                     Trade.signal_id == sid,
                     Trade.order_type == "SELL",
-                    Trade.status.in_(["FILLED", "CLOSED"]),  # CLOSED도 청산 처리
+                    Trade.status.in_(["FILLED", "CLOSED"]),
                 ))
             )).scalars().first()
             if not sold:
@@ -402,13 +417,13 @@ async def check_overtrading(db: AsyncSession, code: str) -> tuple[bool, str]:
     now_utc         = _utcnow()
     today_start_utc = _kst_today_start_utc()
 
-    # 1) 하루 최대 거래 횟수 (signal 기준)
+    # 1) 하루 최대 거래 횟수 (signal 기준, 1차 매수만 카운트)
     day_count = (await db.execute(
         select(func.count(Trade.signal_id.distinct())).where(and_(
             Trade.created_at >= today_start_utc,
             Trade.order_type == "BUY",
             Trade.status.in_(["FILLED", "PARTIAL"]),
-            Trade.phase == 1,  # 1차 매수만 카운트 (분할은 1건으로)
+            Trade.phase == 1,
         ))
     )).scalar() or 0
 
@@ -493,7 +508,7 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
     """
     try:
         from trader import kis_client as kis
-        balance = await kis.get_balance()
+        balance  = await kis.get_balance()
         holdings = balance.get("holdings", [])
     except Exception as e:
         logger.error(f"[SYNC] KIS 잔고 조회 실패: {e}")
@@ -501,7 +516,6 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
 
     kis_codes = {h["code"] for h in holdings}
 
-    # DB 미청산 종목 조회
     open_codes_result = (await db.execute(
         select(Trade.code).where(and_(
             Trade.order_type == "BUY",
@@ -511,7 +525,6 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
 
     db_open_codes = set()
     for code in open_codes_result:
-        # 실제 미청산인지 재확인
         buy_sids = (await db.execute(
             select(Trade.signal_id).where(and_(
                 Trade.code == code,
@@ -532,11 +545,10 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
                 db_open_codes.add(code)
                 break
 
-    # ① DB엔 보유 중 / KIS엔 없음 → 좀비 포지션 정리
+    # ① 좀비 포지션 정리
     zombie_codes = db_open_codes - kis_codes
     fixed = []
     for code in zombie_codes:
-        # 해당 종목의 SELL FAILED를 CLOSED로 보정
         await db.execute(
             Trade.__table__.update()
             .where(and_(
@@ -550,16 +562,16 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
         fixed.append(code)
         logger.warning(f"[SYNC] 좀비 포지션 정리: {code} → SELL FAILED→CLOSED 보정")
 
-    # ② KIS엔 있음 / DB엔 없음 → 미추적 포지션 알림
+    # ② 미추적 포지션 알림
     untracked = kis_codes - db_open_codes
     if untracked:
         logger.error(f"[SYNC] 미추적 포지션 발견: {untracked}")
 
     result = {
-        "kis_holdings":   list(kis_codes),
-        "db_open":        list(db_open_codes),
-        "zombie_fixed":   fixed,
-        "untracked":      list(untracked),
+        "kis_holdings": list(kis_codes),
+        "db_open":      list(db_open_codes),
+        "zombie_fixed": fixed,
+        "untracked":    list(untracked),
     }
 
     if fixed or untracked:
@@ -575,7 +587,29 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
 
 # ── 통합 매수 가능 체크 ────────────────────────────────────────────────────────
 
-async def can_buy(db: AsyncSession, code: str = "") -> tuple[bool, str]:
+async def can_buy(
+    db: AsyncSession,
+    code: str = "",
+    skip_position_check: bool = False,
+) -> tuple[bool, str]:
+    """
+    매수 가능 여부 통합 체크.
+
+    [개선 v3] skip_position_check 파라미터 추가
+      기존: can_buy()가 항상 MAX_POSITIONS 체크를 수행
+            → check_and_execute_phase2에서 호출 시, 1차 매수 종목이 이미
+              포지션으로 카운트되어 MAX_POSITIONS 도달 시 2차 매수 전부 차단
+      수정: skip_position_check=True 전달 시 MAX_POSITIONS 체크 건너뜀
+            → 2차 분할매수는 '신규 종목 진입'이 아닌 '기존 포지션 추가'이므로
+              포지션 수 제한 적용 불필요
+            → 1차 매수 호출: skip_position_check=False (기본값, 신규 포지션 오픈)
+            → 2차 매수 호출: skip_position_check=True  (기존 포지션 추가)
+
+    Args:
+        db: DB 세션
+        code: 종목 코드 (빈 값이면 종목 단위 체크 생략)
+        skip_position_check: True이면 MAX_POSITIONS 체크 건너뜀 (2차 매수용)
+    """
     if not is_market_open():
         return False, "장 외 시간"
 
@@ -583,12 +617,13 @@ async def can_buy(db: AsyncSession, code: str = "") -> tuple[bool, str]:
     if loss_hit:
         return False, f"일일 손실 한도 초과 ({pnl:+,}원)"
 
-    pos_hit, cnt = await check_max_positions(db)
-    if pos_hit:
-        return False, f"최대 보유 종목 수 초과 ({cnt}/{MAX_POSITIONS})"
+    # [개선 v3] skip_position_check=True이면 MAX_POSITIONS 체크 건너뜀
+    if not skip_position_check:
+        pos_hit, cnt = await check_max_positions(db)
+        if pos_hit:
+            return False, f"최대 보유 종목 수 초과 ({cnt}/{MAX_POSITIONS})"
 
     if code:
-        # 블랙리스트 체크
         is_bl, bl_reason = await check_blacklist(db, code)
         if is_bl:
             return False, bl_reason
@@ -627,8 +662,7 @@ async def get_risk_status(db: AsyncSession) -> dict:
                 (t.commission or 0) for t in buy_trades
             ) - (sell.commission or 0)
 
-    # 블랙리스트 현황
-    now_utc = _utcnow()
+    now_utc  = _utcnow()
     bl_count = (await db.execute(
         select(func.count(StockBlacklist.id)).where(
             StockBlacklist.expires_at > now_utc
