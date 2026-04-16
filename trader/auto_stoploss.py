@@ -36,32 +36,18 @@ BLACKLIST_DAYS    = int(os.getenv("BLACKLIST_DAYS",         "3"))
 
 
 async def _get_open_position(db: AsyncSession, signal_id: str) -> dict | None:
-    """
-    signal_id 기준으로 미청산 BUY 포지션을 집계합니다.
-    분할매수(phase 1 + 2) 포지션을 통합하여 반환합니다.
-
-    Returns:
-        {
-            code, name, signal_id,
-            total_quantity,
-            avg_buy_price,     # 가중평균 매수가
-            total_amount,
-            phases: [trade, ...]  # 원본 Trade 객체 목록
-        }
-        또는 None (포지션 없음 / 이미 청산)
-    """
-    # 수정 — FAILED 3회 이상이면 포기 처리
+    # ✅ CLOSED 추가 — sync 보정 후 정상 인식
     sell_filled = (await db.execute(
         select(Trade).where(and_(
             Trade.signal_id == signal_id,
             Trade.order_type == "SELL",
-            Trade.status.in_(["FILLED", "PARTIAL"]),
+            Trade.status.in_(["FILLED", "PARTIAL", "CLOSED"]),  # ← CLOSED 추가
         ))
     )).scalars().first()
     if sell_filled:
         return None
-    
-    # FAILED가 3회 이상이면 더 이상 시도하지 않음
+
+    # FAILED 3회 이상이면 조용히 중단 (알람은 check_and_execute에서 1회만)
     failed_count = (await db.execute(
         select(func.count(Trade.id)).where(and_(
             Trade.signal_id == signal_id,
@@ -69,19 +55,12 @@ async def _get_open_position(db: AsyncSession, signal_id: str) -> dict | None:
             Trade.status == "FAILED",
         ))
     )).scalar() or 0
-    
+
     if failed_count >= 3:
         logger.warning(
-            f"[{signal_id[:8]}] 매도 FAILED {failed_count}회 — "
-            f"자동 중단, 수동 확인 필요"
+            f"[{signal_id[:8]}] 매도 FAILED {failed_count}회 — 건너뜀"
         )
-        await send_message(
-            f"🚨 <b>[AI INVEST] 매도 반복 실패 — 수동 확인 필요</b>\n"
-            f"signal_id: {signal_id[:16]}...\n"
-            f"실패 횟수: {failed_count}회\n"
-            f"자동 재시도를 중단합니다."
-        )
-        return None
+        return None  # ← send_message 제거, 알람은 아래 check_and_execute에서 처리
 
     # 모든 BUY 포지션 수집 (phase 1 + 2)
     buy_trades = (await db.execute(
@@ -221,6 +200,52 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
     if not require_market_open("auto_exit"):
         return []
 
+    # ✅ 이미 청산된(SELL FILLED/PARTIAL/CLOSED) signal_id 사전 조회
+    sold_sids = set((await db.execute(
+        select(Trade.signal_id).where(and_(
+            Trade.order_type == "SELL",
+            Trade.status.in_(["FILLED", "PARTIAL", "CLOSED"]),
+        )).distinct()
+    )).scalars().all())
+
+    # ✅ SELL FAILED 3회 이상 signal_id 사전 조회 (알람 1회 발송 후 CLOSED 처리)
+    failed_rows = (await db.execute(
+        select(Trade.signal_id, Trade.code, Trade.name,
+               func.count(Trade.id).label("cnt"))
+        .where(and_(
+            Trade.order_type == "SELL",
+            Trade.status == "FAILED",
+        ))
+        .group_by(Trade.signal_id, Trade.code, Trade.name)
+        .having(func.count(Trade.id) >= 3)
+    )).all()
+
+    for row in failed_rows:
+        if row.signal_id in sold_sids:
+            continue  # 이미 처리됨
+        # ✅ 1회 알람 후 CLOSED 보정으로 다음 루프에서 sold_sids에 포함됨
+        logger.error(f"[{row.code}] {row.name} 매도 FAILED {row.cnt}회 — CLOSED 보정")
+        await db.execute(
+            Trade.__table__.update()
+            .where(and_(
+                Trade.signal_id == row.signal_id,
+                Trade.order_type == "SELL",
+                Trade.status == "FAILED",
+            ))
+            .values(status="CLOSED")
+        )
+        await send_message(
+            f"🚨 <b>[AI INVEST] 매도 반복 실패 — 수동 확인 필요</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📌 종목: <b>{row.name} ({row.code})</b>\n"
+            f"실패 횟수: {row.cnt}회\n"
+            f"⚙️ DB CLOSED 처리 완료 — 이후 알람 없음\n"
+            f"⚠️ KIS에서 실제 보유 여부 수동 확인 필요"
+        )
+        sold_sids.add(row.signal_id)  # 이번 루프에서도 skip되도록
+
+    await db.commit()
+
     # signal_id 기준으로 미청산 포지션 목록 조회 (중복 없이)
     signal_ids_q = (await db.execute(
         select(Trade.signal_id).where(and_(
@@ -228,6 +253,9 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
             Trade.status == "FILLED",
         )).distinct()
     )).scalars().all()
+
+    # ✅ 이미 청산/보정된 signal_id 제외
+    pending_ids = [sid for sid in signal_ids_q if sid not in sold_sids]
 
     executed = []
 
