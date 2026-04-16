@@ -13,6 +13,11 @@ Auto Exit – 손절 / 익절 / 하드스탑 자동 매도 실행
   HARD_STOP_PCT      : 하드 손절 비율 (기본 -0.03)
   TARGET_PROFIT_PCT  : 익절 비율 (기본 0.05)
   BLACKLIST_DAYS     : 손절 후 블랙리스트 기간 (기본 3일)
+
+[버그 수정 v2]
+  - check_and_execute_auto_exit 루프에서 pending_ids 미사용 버그 수정
+    (기존: signal_ids_q 순회 → 이미 청산된 포지션도 재처리 시도)
+    (수정: pending_ids 순회 → 청산 완료 / FAILED 3회 이상 signal_id 제외)
 """
 import logging
 import os
@@ -195,6 +200,10 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
       - 하드 손절: 현재가 ≤ 평균 매수가 × (1 + HARD_STOP_PCT)   기본 -3%
       - 일반 손절: 현재가 ≤ 평균 매수가 × (1 + STOP_LOSS_PCT)   기본 -2%
       - 익절:      현재가 ≥ 평균 매수가 × (1 + TARGET_PROFIT_PCT) 기본 +5%
+
+    [버그 수정]
+      - pending_ids 미사용 버그 수정: signal_ids_q → pending_ids 순회
+        이미 청산/보정 완료된 signal_id를 제외한 목록만 처리
     """
     from trader.risk_manager import require_market_open
     if not require_market_open("auto_exit"):
@@ -254,12 +263,15 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
         )).distinct()
     )).scalars().all()
 
-    # ✅ 이미 청산/보정된 signal_id 제외
+    # ✅ [버그 수정] 이미 청산/보정된 signal_id 제외한 pending_ids 생성
+    #    기존 코드는 pending_ids를 정의하고도 아래 루프에서 signal_ids_q를 사용하는 버그 존재
+    #    → 이미 청산된 포지션도 매번 KIS API 호출 및 재처리 시도하는 문제 발생
     pending_ids = [sid for sid in signal_ids_q if sid not in sold_sids]
 
     executed = []
 
-    for signal_id in signal_ids_q:
+    # ✅ [버그 수정] signal_ids_q → pending_ids 로 변경
+    for signal_id in pending_ids:
         position = await _get_open_position(db, signal_id)
         if not position:
             continue
@@ -281,7 +293,7 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
         target_price    = avg_price * (1 + TARGET_PROFIT_PCT)
         profit_pct      = (current_price / avg_price - 1) * 100
 
-        # ── 하드 손절 (-3%) ──────────────────────────────────────────────
+        # ── 하드 손절 ────────────────────────────────────────────────────
         if current_price <= hard_stop_price:
             logger.warning(
                 f"하드 손절: {code} {name} "
@@ -294,7 +306,7 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
             if result:
                 executed.append(result)
 
-        # ── 일반 손절 (-2%) ──────────────────────────────────────────────
+        # ── 일반 손절 ────────────────────────────────────────────────────
         elif current_price <= stop_loss_price:
             logger.warning(
                 f"손절: {code} {name} "
@@ -307,7 +319,7 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
             if result:
                 executed.append(result)
 
-        # ── 익절 (+5%) ────────────────────────────────────────────────────
+        # ── 익절 ─────────────────────────────────────────────────────────
         elif current_price >= target_price:
             logger.info(
                 f"익절: {code} {name} "
