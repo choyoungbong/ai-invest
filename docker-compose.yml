@@ -13,12 +13,17 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"      # ✅ 로컬 바인딩으로 변경 (외부 노출 차단)
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U aiinvest"]
       interval: 10s
       timeout: 5s
       retries: 5
+    logging:                         # ✅ 로그 rotation 추가
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
 
   # ── Redis ───────────────────────────────────────────────────────────────────
   redis:
@@ -26,7 +31,7 @@ services:
     container_name: aiinvest-redis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"      # ✅ 로컬 바인딩으로 변경
     volumes:
       - redis_data:/data
     healthcheck:
@@ -34,6 +39,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    logging:                         # ✅ 로그 rotation 추가
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # ── FastAPI Backend ─────────────────────────────────────────────────────────
   api:
@@ -45,26 +55,27 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://aiinvest:aiinvest@postgres:5432/aiinvest
       REDIS_URL: redis://redis:6379/0
-      # ── 텔레그램 ───────────────────────────────────────────
+
+      # ── 텔레그램 ───────────────────────────────────────────────────────────
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
 
-      # ── Claude AI ──────────────────────────────────────────
+      # ── Claude AI ──────────────────────────────────────────────────────────
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
 
-      # ── KIS API ────────────────────────────────────────────
+      # ── KIS API ────────────────────────────────────────────────────────────
       KIS_APP_KEY: ${KIS_APP_KEY:-}
       KIS_APP_SECRET: ${KIS_APP_SECRET:-}
       KIS_ACCOUNT_NO: ${KIS_ACCOUNT_NO:-}
       KIS_MOCK: ${KIS_MOCK:-true}
 
-      # ── 거래 모드 (쌍으로 변경) ────────────────────────────
+      # ── 거래 모드 (쌍으로 변경) ────────────────────────────────────────────
       # 모의: SIMULATION_MODE=true  / LIVE_MODE=false
       # 실전: SIMULATION_MODE=false / LIVE_MODE=true
       SIMULATION_MODE: ${SIMULATION_MODE:-true}
       LIVE_MODE: ${LIVE_MODE:-false}
 
-      # ── 자금 배분 ───────────────────────────────────────────
+      # ── 자금 배분 ───────────────────────────────────────────────────────────
       TOTAL_BUDGET: ${TOTAL_BUDGET:-5000000}
       ALLOC_BREAKOUT: ${ALLOC_BREAKOUT:-0.40}
       ALLOC_MA_CROSS: ${ALLOC_MA_CROSS:-0.30}
@@ -72,7 +83,7 @@ services:
       ALLOC_MACD: ${ALLOC_MACD:-0.10}
       MAX_SINGLE_TRADE_PCT: ${MAX_SINGLE_TRADE_PCT:-0.20}
 
-      # ── 자동 매매 기본 ─────────────────────────────────────
+      # ── 자동 매매 기본 ─────────────────────────────────────────────────────
       AUTO_TRADE_ENABLED: ${AUTO_TRADE_ENABLED:-true}
       MAX_AMOUNT_PER_STOCK: ${MAX_AMOUNT_PER_STOCK:-300000}
       TARGET_PROFIT_PCT: ${TARGET_PROFIT_PCT:-0.03}
@@ -80,7 +91,7 @@ services:
       HARD_STOP_PCT: ${HARD_STOP_PCT:--0.03}
       MAX_HOLD_DAYS: ${MAX_HOLD_DAYS:-3}
 
-      # ── 분할매수 ───────────────────────────────────────────
+      # ── 분할매수 ───────────────────────────────────────────────────────────
       SPLIT_BUY_ENABLED: ${SPLIT_BUY_ENABLED:-true}
       SPLIT_BUY_RATIO: ${SPLIT_BUY_RATIO:-0.6}
       SPLIT_BUY_TRIGGER_PCT: ${SPLIT_BUY_TRIGGER_PCT:-0.003}
@@ -88,25 +99,36 @@ services:
       SPLIT_BUY_MAX_MINUTES: ${SPLIT_BUY_MAX_MINUTES:-30}
       MAX_PHASE2_RISE_PCT: ${MAX_PHASE2_RISE_PCT:-0.03}
 
-      # ── 리스크 관리 ────────────────────────────────────────
+      # ── 리스크 관리 ────────────────────────────────────────────────────────
       DAILY_LOSS_LIMIT: ${DAILY_LOSS_LIMIT:-30000}
       MAX_POSITIONS: ${MAX_POSITIONS:-5}
       BLACKLIST_DAYS: ${BLACKLIST_DAYS:-3}
 
-      # ── 과매매 방지 ────────────────────────────────────────
+      # ── 과매매 방지 ────────────────────────────────────────────────────────
       MAX_DAILY_TRADES: ${MAX_DAILY_TRADES:-10}
       REENTRY_MINUTES: ${REENTRY_MINUTES:-60}
       STOP_REENTRY_MINUTES: ${STOP_REENTRY_MINUTES:-30}
       COOLTIME_HOURS: ${COOLTIME_HOURS:-24}
 
-      # ── 시장 & 시세 수집 ───────────────────────────────────
+      # ── 장 운영 시간 ✅ 신규 추가 ──────────────────────────────────────────
+      TRADE_START_HOUR: ${TRADE_START_HOUR:-9}
+      TRADE_START_MINUTE: ${TRADE_START_MINUTE:-5}
+      TRADE_END_HOUR: ${TRADE_END_HOUR:-15}
+      TRADE_END_MINUTE: ${TRADE_END_MINUTE:-20}
+
+      # ── 수수료 / 슬리피지 ✅ 신규 추가 ────────────────────────────────────
+      BUY_COMMISSION: ${BUY_COMMISSION:-0.00015}
+      SELL_COMMISSION: ${SELL_COMMISSION:-0.00015}
+      DEFAULT_SLIPPAGE: ${DEFAULT_SLIPPAGE:-0.0005}
+
+      # ── 시장 & 시세 수집 ───────────────────────────────────────────────────
       COLLECT_LIMIT: ${COLLECT_LIMIT:-0}
       MARKET_FILTER_DAYS: ${MARKET_FILTER_DAYS:-5}
       BREAKOUT_DAYS: ${BREAKOUT_DAYS:-20}
       VOLUME_MULTIPLIER: ${VOLUME_MULTIPLIER:-2.0}
       MIN_CHANGE_RATE: ${MIN_CHANGE_RATE:-2.0}
 
-      # ── 신호 필터 ──────────────────────────────────────────
+      # ── 신호 필터 ──────────────────────────────────────────────────────────
       MIN_CONFIDENCE: ${MIN_CONFIDENCE:-0.55}
       RSI_MIN: ${RSI_MIN:-45}
       RSI_MAX: ${RSI_MAX:-78}
@@ -115,8 +137,13 @@ services:
       FILTER_MA_ENABLED: ${FILTER_MA_ENABLED:-true}
       FILTER_BB_ENABLED: ${FILTER_BB_ENABLED:-true}
 
+      # ── 외국인/기관 수급 필터 ✅ 신규 추가 ────────────────────────────────
+      FILTER_INVESTOR_FLOW_ENABLED: ${FILTER_INVESTOR_FLOW_ENABLED:-false}
+      INVESTOR_SCORE_MIN: ${INVESTOR_SCORE_MIN:-0.3}
+
+      # ── 슬리피지 한도 ──────────────────────────────────────────────────────
       SLIPPAGE_LIMIT_PCT: ${SLIPPAGE_LIMIT_PCT:-0.005}
-      
+
     ports:
       - "8000:8000"
     volumes:
@@ -126,6 +153,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    logging:                         # ✅ 로그 rotation 추가
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
 
   # ── Next.js Dashboard ──────────────────────────────────────────────────────
   dashboard:
@@ -133,15 +165,21 @@ services:
       context: ./dashboard
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: http://34.64.253.182:8000
+        # ✅ IP 하드코딩 제거 → 환경변수로 관리 (IP 변경 시 재빌드 불필요)
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     container_name: aiinvest-dashboard
     restart: unless-stopped
     environment:
-      NEXT_PUBLIC_API_URL: http://34.64.253.182:8000
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     ports:
       - "3000:3000"
     depends_on:
       - api
+    logging:                         # ✅ 로그 rotation 추가
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
 
 volumes:
   postgres_data:
