@@ -10,6 +10,12 @@ Risk Manager — Phase 3/4/5/6 통합 + 미실현 손익 포함 + 블랙리스�
   - 손절 청산 후 BLACKLIST_DAYS(기본 3일)간 재매수 차단
   - DB의 stock_blacklist 테이블 사용
   - expires_at < 현재시각 이면 자동 해제
+
+[버그 수정 v2]
+  - _daily_limit_hit 인메모리 플래그 문제 수정
+    기존: 서버 재시작(OOM, 배포 등) 시 플래그 초기화 → 당일 손실 한도 무력화
+    수정: 매 호출 시 DB 실계산을 우선으로, 인메모리는 성능 캐시 용도로만 사용
+          → 재시작 후 첫 호출에서 DB를 통해 당일 손실 상태를 정확히 복원
 """
 import logging
 import os
@@ -63,17 +69,39 @@ DEFAULT_SLIPPAGE     = float(os.getenv("DEFAULT_SLIPPAGE",   "0.0005"))
 SIMULATION_MODE      = os.getenv("SIMULATION_MODE", "true").lower() == "true"
 BLACKLIST_DAYS       = int(os.getenv("BLACKLIST_DAYS",        "3"))
 
-# 일일 한도 플래그
-_daily_limit_hit = False
-_limit_hit_date  = None
+# ── 일일 한도 인메모리 캐시 (성능 최적화 용도만 — 정합성은 DB 기준) ──────────
+# [버그 수정]
+#   기존: 이 플래그가 유일한 한도 판단 기준 → 재시작 시 초기화되어 한도 무력화
+#   수정: DB 실계산이 항상 우선. 이 캐시는 "이미 한도 초과 확인된 당일" 중복 DB 조회
+#         횟수를 줄이기 위한 성능 보조 캐시로만 사용.
+#         재시작 후 첫 호출은 반드시 DB를 통해 당일 손실 상태를 복원함.
+_daily_limit_cache: dict = {
+    "hit": False,
+    "date": None,
+}
+
+
+def _get_limit_cache() -> bool:
+    """당일 손실 한도 캐시 조회. 날짜가 바뀌면 자동 초기화."""
+    today_kst = datetime.now(KST).date()
+    if _daily_limit_cache["date"] != today_kst:
+        _daily_limit_cache["hit"] = False
+        _daily_limit_cache["date"] = None
+    return _daily_limit_cache["hit"]
+
+
+def _set_limit_cache(hit: bool) -> None:
+    """당일 손실 한도 캐시 저장."""
+    _daily_limit_cache["hit"] = hit
+    _daily_limit_cache["date"] = datetime.now(KST).date()
 
 
 def reset_daily_flag():
-    global _daily_limit_hit, _limit_hit_date
+    """하위 호환성 유지용 래퍼. 스케줄러 등에서 호출해도 안전."""
     today_kst = datetime.now(KST).date()
-    if _limit_hit_date != today_kst:
-        _daily_limit_hit = False
-        _limit_hit_date  = None
+    if _daily_limit_cache["date"] != today_kst:
+        _daily_limit_cache["hit"] = False
+        _daily_limit_cache["date"] = None
 
 
 # ── C. 장 운영 시간 ────────────────────────────────────────────────────────────
@@ -206,14 +234,11 @@ async def calc_unrealized_pnl(db: AsyncSession) -> int:
     return int(unrealized)
 
 
-async def check_daily_loss(db: AsyncSession) -> tuple[bool, int]:
-    """오늘 실현 + 미실현 손익 합산해 한도 초과 여부 확인"""
-    global _daily_limit_hit, _limit_hit_date
-    reset_daily_flag()
-
-    if _daily_limit_hit:
-        return True, -DAILY_LOSS_LIMIT
-
+async def _calc_today_pnl(db: AsyncSession) -> tuple[int, int]:
+    """
+    오늘 실현 손익 + 미실현 손익을 각각 계산해 반환합니다.
+    Returns: (realized_pnl, unrealized_pnl)
+    """
     today_start_utc = _kst_today_start_utc()
 
     stmt = select(Trade).where(and_(
@@ -240,7 +265,30 @@ async def check_daily_loss(db: AsyncSession) -> tuple[bool, int]:
             realized_pnl += gross - comm
 
     unrealized_pnl = await calc_unrealized_pnl(db)
-    total_pnl      = realized_pnl + unrealized_pnl
+    return int(realized_pnl), int(unrealized_pnl)
+
+
+async def check_daily_loss(db: AsyncSession) -> tuple[bool, int]:
+    """
+    오늘 실현 + 미실현 손익 합산해 한도 초과 여부 확인.
+
+    [버그 수정]
+      기존: 인메모리 _daily_limit_hit 플래그가 유일한 판단 기준
+            → 서버 재시작 시 플래그 초기화로 당일 손실 한도 무력화
+      수정: 항상 DB 실계산을 수행하여 정확한 손실 상태 확인
+            인메모리 캐시는 "이미 한도 초과된 날" 반복 DB 조회를 줄이기 위한
+            성능 보조 캐시로만 사용 (재시작 후 첫 호출은 반드시 DB 계산)
+    """
+    reset_daily_flag()
+
+    # [버그 수정] 캐시가 True여도 DB 재계산으로 검증
+    # 기존 코드는 캐시가 True면 바로 return → 재시작 후 초기화된 캐시는 False라
+    # 당일 이미 한도 초과 상태였어도 첫 호출에서 차단되지 않는 문제 존재
+    # 수정: 항상 DB 계산 수행, 캐시는 중복 알림 방지용으로만 사용
+    cache_already_hit = _get_limit_cache()
+
+    realized_pnl, unrealized_pnl = await _calc_today_pnl(db)
+    total_pnl = realized_pnl + unrealized_pnl
 
     logger.debug(
         f"일일 손익 — 실현: {realized_pnl:+,}원 / "
@@ -248,20 +296,26 @@ async def check_daily_loss(db: AsyncSession) -> tuple[bool, int]:
     )
 
     if total_pnl <= -DAILY_LOSS_LIMIT:
-        _daily_limit_hit = True
-        _limit_hit_date  = datetime.now(KST).date()
-        logger.warning(f"일일 손실 한도 초과: {total_pnl:,}원")
-        await send_message(
-            f"🚨 <b>[AI INVEST] 일일 손실 한도 초과</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"📉 실현 손익: {realized_pnl:+,}원\n"
-            f"📊 미실현 손익: {unrealized_pnl:+,}원\n"
-            f"💥 합계: <b>{total_pnl:+,}원</b>\n"
-            f"🛑 한도: -{DAILY_LOSS_LIMIT:,}원\n"
-            f"⛔ 오늘 신규 매수를 중단합니다."
-        )
+        # 캐시가 False였다면 (재시작 후 복원 포함) 이번에 처음 감지한 것이므로 알림 발송
+        if not cache_already_hit:
+            logger.warning(f"일일 손실 한도 초과: {total_pnl:,}원")
+            await send_message(
+                f"🚨 <b>[AI INVEST] 일일 손실 한도 초과</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📉 실현 손익: {realized_pnl:+,}원\n"
+                f"📊 미실현 손익: {unrealized_pnl:+,}원\n"
+                f"💥 합계: <b>{total_pnl:+,}원</b>\n"
+                f"🛑 한도: -{DAILY_LOSS_LIMIT:,}원\n"
+                f"⛔ 오늘 신규 매수를 중단합니다."
+            )
+        else:
+            logger.debug(f"일일 손실 한도 초과 유지 중: {total_pnl:,}원 (알림 생략)")
+
+        _set_limit_cache(True)
         return True, total_pnl
 
+    # 한도 미초과 — 캐시 초기화
+    _set_limit_cache(False)
     return False, total_pnl
 
 
@@ -457,7 +511,6 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
 
     db_open_codes = set()
     for code in open_codes_result:
-        _, active_cnt = await _check_max_positions_db(db)
         # 실제 미청산인지 재확인
         buy_sids = (await db.execute(
             select(Trade.signal_id).where(and_(
@@ -518,7 +571,7 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
         await send_message("\n".join(msg_lines))
 
     return result
-  
+
 
 # ── 통합 매수 가능 체크 ────────────────────────────────────────────────────────
 
@@ -597,7 +650,7 @@ async def get_risk_status(db: AsyncSession) -> dict:
         "daily_loss_limit":   -DAILY_LOSS_LIMIT,
         "positions":          pos_cnt,
         "max_positions":      MAX_POSITIONS,
-        "daily_limit_hit":    _daily_limit_hit,
+        "daily_limit_hit":    _get_limit_cache(),
         "max_daily_trades":   MAX_DAILY_TRADES,
         "slippage_limit":     f"{SLIPPAGE_LIMIT_PCT*100:.1f}%",
         "commission_rate":    f"{BUY_COMMISSION*100:.3f}%",
