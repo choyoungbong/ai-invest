@@ -3,9 +3,9 @@ Scheduler – 자동 실행 스케줄러
 
 스케줄 (KST 기준):
   08:50          – 종목 마스터 동기화
-  09:05, 10:00, 11:00, 13:00, 14:00, 15:10
+  09:05, 10:00, 11:00, 12:00, 13:00, 14:00, 15:10
                  – 시세수집 + 전략 + AI + 매수 (풀 실행)
-  09:30, 10:30, 11:30, 13:30, 14:30
+  09:30, 10:30, 11:30, 12:30, 13:30, 14:30
                  – 수집 없이 스캔+전략+매수만 (빠른 실행, 10초 이내)
   장중 5분마다   – 손절/익절 체크
   장중 10분마다  – 2차 분할매수 체크
@@ -13,14 +13,16 @@ Scheduler – 자동 실행 스케줄러
   매주 금요일 16:00 – 주간 리포트
   매시 정각      – 헬스체크
 
-개선사항 (v3):
-  ✅ 수집(collect)과 스캔(scan)을 분리
-  ✅ 30분 간격 빠른 스캔 추가 (총 11회 → 기회 2배)
-  ✅ 빠른 스캔은 DB 기존 시세로 전략 실행 (10초 이내 완료)
-  ✅ 신호 없음 알림 하루 1회로 축소
+[버그 수정 v4 — 동일 종목 반복 알림 제거]
+  기존: 30분마다 스캔 시 이미 오늘 알림을 보낸 종목도 매번 텔레그램 재발송
+        → 같은 종목이 09:05, 09:30, 10:00, 10:30 … 계속 반복 알림
+  수정: _notified_codes_today (인메모리 set) 로 당일 알림 발송 종목 추적
+        → 오늘 처음 발생한 종목만 알림, 이미 알린 종목은 로그만 출력
+        → 날짜가 바뀌면 자동 초기화 (다음 날 다시 알림 발송)
+        → 실행(매수 시도)은 모든 신호 대상으로 유지 (알림만 중복 억제)
 """
 import logging
-from datetime import datetime
+from datetime import datetime, date
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -36,17 +38,45 @@ from notification.service import send_message
 from trader.auto_stoploss import check_and_execute_stop_loss
 from trader.auto_trader import auto_execute_signals, check_and_execute_phase2
 from report.service import send_daily_report
-
-# ✅ 추가
 from trader.risk_manager import sync_positions_with_kis
 
 logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
 
-# 하루 1회 "신호 없음" 알림 억제 플래그
-_no_signal_alerted_date = None
+# ── 알림 중복 억제 상태 ────────────────────────────────────────────────────────
+# "신호 없음" 알림 — 하루 1회
+_no_signal_alerted_date: date | None = None
 
-# ── KIS ↔ DB 포지션 싱크 ────────────────────────────────────────────
+# [버그 수정 v4] 당일 알림 발송 종목 코드 추적
+# 날짜가 바뀌면 자동 초기화, 이미 알림 보낸 종목은 당일 재알림 생략
+_notified_codes_today:   set[str]    = set()
+_notified_codes_date:    date | None = None
+
+
+def _get_new_signal_codes(all_signals: list[dict]) -> list[dict]:
+    """
+    오늘 처음 발생한 신호(코드 기준)만 반환합니다.
+    이미 알림을 보낸 종목은 제외하고, 새 종목만 추적 set에 추가합니다.
+
+    실행(매수 시도) 대상은 all_signals 전체이며, 이 함수는 알림 필터링 전용입니다.
+    """
+    global _notified_codes_today, _notified_codes_date
+
+    today_kst = datetime.now(KST).date()
+    if _notified_codes_date != today_kst:
+        _notified_codes_today = set()
+        _notified_codes_date  = today_kst
+
+    new_signals = [s for s in all_signals if s["code"] not in _notified_codes_today]
+
+    # 이번 배치에서 새로 알린 종목을 set에 등록
+    for s in new_signals:
+        _notified_codes_today.add(s["code"])
+
+    return new_signals
+
+
+# ── KIS ↔ DB 포지션 싱크 ──────────────────────────────────────────────────────
 
 async def job_sync_positions():
     """KIS 실제 잔고 ↔ DB 포지션 싱크"""
@@ -64,6 +94,12 @@ async def _run_strategy_and_trade(db, now_str: str) -> tuple[list, list]:
     """
     스캔 → 메인전략 + 확장전략 → AI → 매수 공통 로직.
     수집(collect) 여부와 무관하게 재사용.
+
+    [버그 수정 v4] 신호 알림 중복 억제
+      - 실행(auto_execute_signals)은 all_signals 전체 대상 유지
+        (execution 레이어에서 open_position / blacklist / overtrading 등으로 이미 보호됨)
+      - 텔레그램 알림은 오늘 처음 등장한 종목 코드만 발송
+        (이미 알린 종목 재발생 시 로그만 출력하고 알림 생략)
     """
     global _no_signal_alerted_date
 
@@ -84,12 +120,28 @@ async def _run_strategy_and_trade(db, now_str: str) -> tuple[list, list]:
     if all_signals:
         await analyze_all_new_signals(db)
 
-    # 신호 없음 알림 — 하루 1회만
     today_kst = datetime.now(KST).date()
+
     if all_signals:
         _no_signal_alerted_date = None
-        await _notify_signals_summary(all_signals, main_signals, ext_unique)
+
+        # [버그 수정 v4] 당일 처음 발생한 종목만 알림 발송
+        new_for_notify = _get_new_signal_codes(all_signals)
+        repeat_count   = len(all_signals) - len(new_for_notify)
+
+        if new_for_notify:
+            await _notify_signals_summary(new_for_notify, main_signals, ext_unique, now_str)
+        
+        if repeat_count > 0:
+            # 이미 알림 보낸 종목은 로그만 출력 (텔레그램 알림 생략)
+            repeat_codes = [s["code"] for s in all_signals if s["code"] not in {n["code"] for n in new_for_notify}]
+            logger.info(
+                f"[스케줄러] {now_str} 반복 신호 {repeat_count}건 알림 생략 "
+                f"(오늘 이미 발송된 종목: {repeat_codes})"
+            )
+
     else:
+        # 신호 없음 — 하루 1회만 알림
         if _no_signal_alerted_date != today_kst:
             _no_signal_alerted_date = today_kst
             await send_message(
@@ -100,12 +152,12 @@ async def _run_strategy_and_trade(db, now_str: str) -> tuple[list, list]:
         else:
             logger.info(f"[스케줄러] {now_str} 신호 없음 — 알림 생략")
 
+    # 실행은 all_signals 전체 대상 (알림 필터와 무관)
     orders = []
     if all_signals:
         filtered = await filter_signals(db, all_signals)
-        logger.info(f"전략 신호: {len(all_signals)}")
-        logger.info(f"필터 후: {len(filtered)}")
-        orders   = await auto_execute_signals(db, filtered)
+        logger.info(f"전략 신호: {len(all_signals)} / 필터 후: {len(filtered)}")
+        orders = await auto_execute_signals(db, filtered)
 
     return all_signals, orders
 
@@ -115,7 +167,7 @@ async def _run_strategy_and_trade(db, now_str: str) -> tuple[list, list]:
 async def job_collect_and_run():
     """
     [풀 실행] 시세 수집 → 스캔 → 전략 → AI → 매수 → 기간만료 청산
-    하루 6회: 09:05, 10:00, 11:00, 13:00, 14:00, 15:10
+    하루 7회: 09:05, 10:00, 11:00, 12:00, 13:00, 14:00, 15:10
     """
     now     = datetime.now(KST)
     now_str = now.strftime("%H:%M")
@@ -148,7 +200,7 @@ async def job_collect_and_run():
 async def job_scan_only():
     """
     [빠른 실행] 수집 없이 DB 기존 시세로 스캔+전략+매수만 실행
-    10초 이내 완료. 하루 5회: 09:30, 10:30, 11:30, 13:30, 14:30
+    10초 이내 완료. 하루 6회: 09:30, 10:30, 11:30, 12:30, 13:30, 14:30
     """
     now     = datetime.now(KST)
     now_str = now.strftime("%H:%M")
@@ -173,25 +225,36 @@ async def job_scan_only():
 # ── 알림 헬퍼 ─────────────────────────────────────────────────────────────────
 
 async def _notify_signals_summary(
-    all_signals: list,
+    new_signals: list,   # [버그 수정 v4] 오늘 처음 발생한 신호만 전달받음
     main_signals: list,
     ext_signals: list,
+    now_str: str = "",
 ) -> None:
-    """신호 요약 알림 (메인+확장 전략 구분)"""
+    """
+    신호 요약 텔레그램 알림.
+    new_signals: 오늘 처음 발생한 종목만 포함 (중복 종목 제외됨)
+    """
+    if not now_str:
+        now_str = datetime.now(KST).strftime("%H:%M")
+
     try:
         from notification.service import notify_signals_summary
-        await notify_signals_summary(all_signals)
+        await notify_signals_summary(new_signals)
     except Exception:
-        now_str = datetime.now(KST).strftime("%H:%M")
-        lines = [f"📊 <b>[AI INVEST] 신호 발생</b> ({now_str})\n━━━━━━━━━━━━━━━━━━"]
-        if main_signals:
-            lines.append(f"🎯 돌파전략: {len(main_signals)}건")
-        if ext_signals:
-            lines.append(f"📈 확장전략: {len(ext_signals)}건")
-        for s in all_signals[:5]:
+        # notification.service에 notify_signals_summary가 없는 경우 fallback
+        new_main = [s for s in new_signals if s in main_signals]
+        new_ext  = [s for s in new_signals if s in ext_signals]
+
+        lines = [f"📊 <b>[AI INVEST] 신규 신호 발생</b> ({now_str})\n━━━━━━━━━━━━━━━━━━"]
+        if new_main:
+            lines.append(f"🎯 돌파전략: {len(new_main)}건")
+        if new_ext:
+            lines.append(f"📈 확장전략: {len(new_ext)}건")
+        for s in new_signals[:5]:
             lines.append(f"  • {s['name']} ({s['code']}) @ {s['price']:,}원")
-        if len(all_signals) > 5:
-            lines.append(f"  ... 외 {len(all_signals)-5}건")
+        if len(new_signals) > 5:
+            lines.append(f"  ... 외 {len(new_signals)-5}건")
+        lines.append("※ 오늘 처음 발생한 종목만 표시됩니다.")
         await send_message("\n".join(lines))
 
 
@@ -217,7 +280,7 @@ async def job_phase2_check():
 
 
 async def job_stop_loss_check():
-    """손절/익절 체크 — 장중 5분마다"""
+    """손절/익절/트레일링 스탑 체크 — 장중 5분마다"""
     try:
         async with AsyncSessionLocal() as db:
             executed = await check_and_execute_stop_loss(db)
@@ -230,8 +293,8 @@ async def job_stop_loss_check():
 async def job_conditional_sell_eod():
     """
     15:10 조건부 청산
-    - 수익 +1% 미만 종목 → 당일 청산
-    - 수익 +1% 이상 종목 → 익일 보유 허용
+    - 수익 +1% 미만 포지션 → 당일 청산 (익일 갭다운 리스크 방지)
+    - 수익 +1% 이상 포지션 → 익일 보유 허용 (트레일링 스탑 계속 동작)
     """
     from sqlalchemy import select, and_
     from api.models import Trade
@@ -261,11 +324,9 @@ async def job_conditional_sell_eod():
             profit_pct = (current_price / position["avg_buy_price"] - 1) * 100
 
             if profit_pct >= 1.0:
-                # +1% 이상 → 익일 보유
                 kept.append(f"{position['name']} ({profit_pct:+.1f}%)")
-                logger.info(f"[{position['code']}] 익일 보유: {profit_pct:+.1f}%")
+                logger.info(f"[{position['code']}] 익일 보유 유지: {profit_pct:+.1f}%")
             else:
-                # +1% 미만 → 당일 청산
                 result = await _execute_sell(
                     db, position, current_price,
                     f"15:10 조건부 청산 ({profit_pct:+.1f}%)"
@@ -285,7 +346,7 @@ async def job_conditional_sell_eod():
 
 
 async def job_force_sell_eod():
-    """장 종료 전 미청산 포지션 전량 청산"""
+    """장 종료 전 미청산 포지션 전량 청산 (현재 비활성)"""
     try:
         import httpx
         async with httpx.AsyncClient() as client:
@@ -300,7 +361,7 @@ async def job_force_sell_eod():
         )
     except Exception as e:
         logger.error(f"[스케줄러] 장 종료 전 청산 오류: {e}")
-      
+
 
 async def job_daily_report():
     """장 마감 후 일일 리포트"""
@@ -327,12 +388,12 @@ async def job_weekly_report():
 
 def create_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(
-      timezone=KST,
-      job_defaults={
-          "coalesce": True,
-          "max_instances": 1,
-          "misfire_grace_time": 300
-      }
+        timezone=KST,
+        job_defaults={
+            "coalesce":            True,
+            "max_instances":       1,
+            "misfire_grace_time":  300,
+        }
     )
 
     # 08:50 종목 마스터 동기화
@@ -342,75 +403,57 @@ def create_scheduler() -> AsyncIOScheduler:
         id="sync_master", name="종목 마스터 동기화",
     )
 
-    # ── 풀 실행: 하루 7회 (수집 + 전략 + 매수) ───────────────────────────────
+    # ── 풀 실행: 하루 7회 (수집 + 전략 + 매수) ──────────────────────────────
     for hour, minute in [(9, 5), (10, 0), (11, 0), (12, 0), (13, 0), (14, 0), (15, 10)]:
         scheduler.add_job(
             job_collect_and_run,
-            CronTrigger(
-                hour=hour, minute=minute,
-                day_of_week="mon-fri", timezone=KST
-            ),
+            CronTrigger(hour=hour, minute=minute, day_of_week="mon-fri", timezone=KST),
             id=f"run_{hour:02d}{minute:02d}",
             name=f"{hour:02d}:{minute:02d} 풀 실행",
         )
 
-    # ── 빠른 스캔: 하루 5회 추가 (수집 없이 전략 + 매수) ─────────────────────
+    # ── 빠른 스캔: 하루 6회 (수집 없이 전략 + 매수) ─────────────────────────
     for hour, minute in [(9, 30), (10, 30), (11, 30), (12, 30), (13, 30), (14, 30)]:
         scheduler.add_job(
             job_scan_only,
-            CronTrigger(
-                hour=hour, minute=minute,
-                day_of_week="mon-fri", timezone=KST
-            ),
+            CronTrigger(hour=hour, minute=minute, day_of_week="mon-fri", timezone=KST),
             id=f"scan_{hour:02d}{minute:02d}",
             name=f"{hour:02d}:{minute:02d} 빠른 스캔",
         )
 
-    # ✅ 포지션 싱크 (추가)
+    # ── 포지션 싱크: 장 시작 / 장 종료 ─────────────────────────────────────
     scheduler.add_job(
         job_sync_positions,
         CronTrigger(hour=9, minute=5, timezone=KST),
-        id="sync_positions_open"
+        id="sync_positions_open", name="포지션 싱크 (장 시작)",
     )
-
     scheduler.add_job(
         job_sync_positions,
         CronTrigger(hour=15, minute=25, timezone=KST),
-        id="sync_positions_close"
+        id="sync_positions_close", name="포지션 싱크 (장 종료)",
     )
-  
 
-    # ── 손절/익절 체크: 5분마다 ──────────────────────────────────────────────
+    # ── 손절/익절/트레일링 체크: 5분마다 ────────────────────────────────────
     scheduler.add_job(
         job_stop_loss_check,
-        CronTrigger(
-            hour="9-15",
-            minute="*/5",
-            day_of_week="mon-fri",
-            timezone=KST,
-        ),
+        CronTrigger(hour="9-15", minute="*/5", day_of_week="mon-fri", timezone=KST),
         id="stop_loss_check",
         name="손절/익절 체크 (5분)",
         max_instances=1,
         coalesce=True,
     )
 
-    # ── 2차 분할매수 체크: 10분마다 ──────────────────────────────────────────
+    # ── 2차 분할매수 체크: 10분마다 ─────────────────────────────────────────
     scheduler.add_job(
         job_phase2_check,
-        CronTrigger(
-            hour="9-15",
-            minute="*/10",
-            day_of_week="mon-fri",
-            timezone=KST,
-        ),
+        CronTrigger(hour="9-15", minute="*/10", day_of_week="mon-fri", timezone=KST),
         id="phase2_check",
         name="2차 분할매수 체크 (10분)",
         max_instances=1,
         coalesce=True,
     )
 
-    # 15:10 조건부 청산
+    # ── 15:10 조건부 청산 ────────────────────────────────────────────────────
     scheduler.add_job(
         job_conditional_sell_eod,
         CronTrigger(hour=15, minute=10, day_of_week="mon-fri", timezone=KST),
@@ -418,29 +461,29 @@ def create_scheduler() -> AsyncIOScheduler:
         name="15:10 조건부 청산",
     )
 
-    # 15:15 당일 전체 청산 (익일 보유 방지)
-    #scheduler.add_job(
-    #    job_force_sell_eod,
-    #    CronTrigger(hour=15, minute=15, day_of_week="mon-fri", timezone=KST),
-    #    id="force_sell_eod",
-    #    name="15:15 당일 청산",
-    #)
+    # ── 15:15 당일 전체 강제 청산 (현재 비활성 — 필요 시 주석 해제) ──────────
+    # scheduler.add_job(
+    #     job_force_sell_eod,
+    #     CronTrigger(hour=15, minute=15, day_of_week="mon-fri", timezone=KST),
+    #     id="force_sell_eod",
+    #     name="15:15 당일 강제 청산",
+    # )
 
-    # 15:40 일일 리포트
+    # ── 15:40 일일 리포트 ────────────────────────────────────────────────────
     scheduler.add_job(
         job_daily_report,
         CronTrigger(hour=15, minute=40, day_of_week="mon-fri", timezone=KST),
         id="daily_report", name="일일 리포트",
     )
 
-    # 매주 금요일 16:00 주간 리포트
+    # ── 매주 금요일 16:00 주간 리포트 ───────────────────────────────────────
     scheduler.add_job(
         job_weekly_report,
         CronTrigger(hour=16, minute=0, day_of_week="fri", timezone=KST),
         id="weekly_report", name="주간 리포트",
     )
 
-    # 매시 정각 헬스체크
+    # ── 매시 정각 헬스체크 ───────────────────────────────────────────────────
     async def job_health():
         try:
             from api.monitor import run_health_check_and_notify
