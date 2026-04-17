@@ -169,7 +169,7 @@ async def calc_unrealized_pnl(db: AsyncSession) -> int:
             select(Trade).where(and_(
                 Trade.signal_id == sid,
                 Trade.order_type == "SELL",
-                Trade.status == "FILLED",
+                Trade.status.in_(["FILLED", "CLOSED"]),   # ← CLOSED 추가
             ))
         )).scalars().first()
         if sold:
