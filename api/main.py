@@ -1,5 +1,9 @@
 """
 AI INVEST – FastAPI 메인 앱
+
+[B단계] 신규 엔드포인트 추가:
+  GET  /performance/by-strategy  — 전략별 실제 거래 성과 집계
+  POST /backtest/grid-search     — 파라미터 최적화 그리드 서치
 """
 import logging
 import uuid
@@ -8,30 +12,24 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 
 from api.database import get_db, init_db, AsyncSessionLocal
 from api.models import Signal, Trade
 
-from collector.service import (
-    sync_stock_master,
-    collect_daily_ohlcv,
-)
+from collector.service import sync_stock_master, collect_daily_ohlcv
 from scanner.service import run_scanner, get_top_volume_stocks
 from strategy.service import run_strategy, get_signals
 from notification.service import (
-    notify_test,
-    notify_signal,
-    notify_signals_summary,
-    notify_trade,
-    send_message,
+    notify_test, notify_signal, notify_signals_summary,
+    notify_trade, send_message,
 )
 from ai.service import analyze_signal, analyze_all_new_signals
 from trader.service import execute_order, check_stop_loss
 from trader.kis_client import get_balance, get_current_price, IS_MOCK
 from trader import kis_client as kis
 from scheduler.service import create_scheduler
-from backtest.service import run_backtest, run_multi_backtest
+from backtest.service import run_backtest, run_multi_backtest, run_grid_search
 from strategy.extended import run_extended_strategy
 from api.monitor import ErrorMonitorMiddleware, run_health_check_and_notify, get_recent_errors
 from trader.allocation import get_allocation_summary, calc_quantity_by_budget
@@ -49,9 +47,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── 백그라운드 서비스 ─────────────────────────────────────────────────────────
-# CollectorService 제거 — 스케줄러(하루 6회)가 수집을 담당
-# 이중 수집 시 9분 소요 → 손절 체크 SKIP 문제 방지
 rt_monitor = RealTimeMonitor(db_factory=AsyncSessionLocal)
 
 
@@ -61,7 +56,6 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("DB 초기화 완료")
 
-    # CollectorService.start() 제거 — 스케줄러와 이중 수집 방지
     scheduler = create_scheduler()
     scheduler.start()
     logger.info("스케줄러 시작 완료")
@@ -77,7 +71,6 @@ async def lifespan(app: FastAPI):
     logger.info("AI INVEST 서버 종료")
 
 
-# ── FastAPI 앱 ────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="AI INVEST",
     description="AI 기반 한국 주식 자동매매 시스템",
@@ -102,7 +95,7 @@ async def health():
     return {"status": "ok", "service": "ai-invest", "mock": IS_MOCK}
 
 
-# ── Collector 엔드포인트 ──────────────────────────────────────────────────────
+# ── Collector ─────────────────────────────────────────────────────────────────
 @app.post("/collector/sync-master", tags=["Collector"])
 async def sync_master(db: AsyncSession = Depends(get_db)):
     await sync_stock_master(db)
@@ -118,7 +111,7 @@ async def collect_today(
     return {"message": f"시세 수집 완료: {len(rows) if rows else 0}건"}
 
 
-# ── Scanner 엔드포인트 ────────────────────────────────────────────────────────
+# ── Scanner ───────────────────────────────────────────────────────────────────
 @app.get("/scanner/top-volume", tags=["Scanner"])
 async def scanner_top_volume(
     top_n: int = Query(80, ge=1, le=150),
@@ -128,7 +121,7 @@ async def scanner_top_volume(
     return {"count": len(results), "data": results}
 
 
-# ── Strategy 엔드포인트 ───────────────────────────────────────────────────────
+# ── Strategy ──────────────────────────────────────────────────────────────────
 @app.post("/strategy/run", tags=["Strategy"])
 async def strategy_run(
     top_n: int = Query(80, ge=1, le=150),
@@ -136,10 +129,8 @@ async def strategy_run(
 ):
     candidates = await run_scanner(db, top_n=top_n)
     signals    = await run_strategy(db, candidates)
-
     if signals:
         await analyze_all_new_signals(db)
-
     await notify_signals_summary(signals)
 
     orders = []
@@ -148,15 +139,14 @@ async def strategy_run(
         orders   = await auto_execute_signals(db, filtered)
         if orders:
             from trader.ws_client import update_subscribed_codes, _subscribed_codes
-            new_codes = [o["code"] for o in orders]
-            update_subscribed_codes(list(_subscribed_codes) + new_codes)
+            update_subscribed_codes(list(_subscribed_codes) + [o["code"] for o in orders])
 
     return {
-        "message":    "전략 실행 완료",
+        "message": "전략 실행 완료",
         "candidates": len(candidates),
-        "signals":    len(signals),
-        "orders":     len(orders),
-        "data":       signals,
+        "signals": len(signals),
+        "orders": len(orders),
+        "data": signals,
     }
 
 
@@ -172,36 +162,27 @@ async def list_signals(
 
 @app.get("/signals/{signal_id}", tags=["Strategy"])
 async def get_signal_detail(signal_id: str, db: AsyncSession = Depends(get_db)):
-    stmt = select(Signal).where(Signal.id == signal_id)
-    row  = (await db.execute(stmt)).scalars().first()
+    row = (await db.execute(select(Signal).where(Signal.id == signal_id))).scalars().first()
     if not row:
         raise HTTPException(status_code=404, detail="신호를 찾을 수 없습니다")
     return {
-        "id":           row.id,
-        "code":         row.code,
-        "name":         row.name,
-        "signal_type":  row.signal_type,
-        "strategy":     row.strategy,
-        "price":        row.price,
-        "target_price": row.target_price,
-        "stop_loss":    row.stop_loss,
-        "reason":       row.reason,
-        "confidence":   row.confidence,
-        "is_executed":  row.is_executed,
-        "created_at":   row.created_at.isoformat() if row.created_at else None,
+        "id": row.id, "code": row.code, "name": row.name,
+        "signal_type": row.signal_type, "strategy": row.strategy,
+        "price": row.price, "target_price": row.target_price,
+        "stop_loss": row.stop_loss, "reason": row.reason,
+        "confidence": row.confidence, "is_executed": row.is_executed,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
     }
 
 
-# ── Risk Manager 엔드포인트 ───────────────────────────────────────────────────
+# ── Risk Manager ──────────────────────────────────────────────────────────────
 @app.get("/risk/status", tags=["Risk"])
 async def risk_status(db: AsyncSession = Depends(get_db)):
-    """현재 리스크 상태 조회 (실현+미실현 손익 포함)"""
     return await get_risk_status(db)
 
 
 @app.post("/risk/reset-daily", tags=["Risk"])
 async def reset_daily_limit():
-    """일일 손실 한도 플래그 수동 초기화 (긴급용)"""
     from trader.risk_manager import reset_daily_flag
     reset_daily_flag()
     return {"message": "일일 손실 한도 플래그 초기화 완료"}
@@ -210,95 +191,58 @@ async def reset_daily_limit():
 # ── 긴급 전체 청산 ────────────────────────────────────────────────────────────
 @app.post("/trade/emergency-close-all", tags=["Trade"])
 async def emergency_close_all(
-    confirm: bool = Query(False, description="반드시 true 를 명시해야 실행됩니다"),
+    confirm: bool = Query(False),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    ⚠️ 긴급 전체 청산 — 보유 중인 모든 포지션을 즉시 시장가 매도합니다.
-    반드시 ?confirm=true 를 붙여야 실행됩니다.
-    """
     if not confirm:
-        return {
-            "message": "confirm=true 를 붙여야 실행됩니다",
-            "example": "/trade/emergency-close-all?confirm=true",
-        }
+        return {"message": "confirm=true 를 붙여야 실행됩니다"}
 
-    stmt = select(Trade).where(and_(
-        Trade.order_type == "BUY",
-        Trade.status.in_(["FILLED", "PARTIAL"]),
-    ))
-    buy_trades = (await db.execute(stmt)).scalars().all()
+    buy_trades = (await db.execute(
+        select(Trade).where(and_(Trade.order_type == "BUY", Trade.status.in_(["FILLED", "PARTIAL"])))
+    )).scalars().all()
 
     closed, failed = [], []
-
     for trade in buy_trades:
-        # 이미 청산된 포지션 제외
         sold = (await db.execute(
             select(Trade).where(and_(
                 Trade.signal_id == trade.signal_id,
-                Trade.order_type == "SELL",
-                Trade.status == "FILLED",
+                Trade.order_type == "SELL", Trade.status == "FILLED",
             ))
         )).scalars().first()
         if sold:
             continue
 
         try:
-            price_data    = await kis.get_current_price(trade.code)
-            current_price = price_data["price"]
+            current_price = (await kis.get_current_price(trade.code))["price"]
             result        = await kis.sell_order(trade.code, trade.quantity, order_type="01")
-
-            status = "FILLED" if result["success"] else "FAILED"
+            status        = "FILLED" if result["success"] else "FAILED"
             await db.execute(Trade.__table__.insert().values(
-                id=str(uuid.uuid4()),
-                signal_id=trade.signal_id,
-                code=trade.code,
-                name=trade.name,
-                order_type="SELL",
-                price=current_price,
-                quantity=trade.quantity,
-                amount=current_price * trade.quantity,
-                status=status,
-                broker_order_id=result.get("order_no", ""),
+                id=str(uuid.uuid4()), signal_id=trade.signal_id,
+                code=trade.code, name=trade.name,
+                order_type="SELL", price=current_price,
+                quantity=trade.quantity, amount=current_price * trade.quantity,
+                status=status, broker_order_id=result.get("order_no", ""),
                 is_simulation=trade.is_simulation,
             ))
             await db.commit()
-
             if result["success"]:
                 pnl = (current_price - trade.price) * trade.quantity
-                closed.append({
-                    "code":       trade.code,
-                    "name":       trade.name,
-                    "quantity":   trade.quantity,
-                    "net_profit": pnl,
-                })
+                closed.append({"code": trade.code, "name": trade.name,
+                               "quantity": trade.quantity, "net_profit": pnl})
             else:
                 failed.append({"code": trade.code, "name": trade.name, "reason": "주문 실패"})
-
         except Exception as e:
-            logger.error(f"긴급청산 실패 [{trade.code}]: {repr(e)}")
             failed.append({"code": trade.code, "name": trade.name, "reason": repr(e)})
 
     await send_message(
-        f"🚨 <b>[AI INVEST] 긴급 전체 청산 실행</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"✅ 성공: {len(closed)}건\n"
-        f"❌ 실패: {len(failed)}건\n"
-        + ("\n" + "\n".join([
-            f"• {c['name']} ({c['code']}) {c['net_profit']:+,.0f}원"
-            for c in closed
-        ]) if closed else "")
+        f"🚨 <b>[AI INVEST] 긴급 전체 청산</b>\n"
+        f"✅ 성공: {len(closed)}건 / ❌ 실패: {len(failed)}건"
     )
-
-    logger.warning(f"긴급 전체 청산: 성공 {len(closed)}건 / 실패 {len(failed)}건")
-    return {
-        "message": f"긴급 청산 완료: 성공 {len(closed)}건 / 실패 {len(failed)}건",
-        "closed":  closed,
-        "failed":  failed,
-    }
+    return {"message": f"청산 완료: 성공 {len(closed)}건 / 실패 {len(failed)}건",
+            "closed": closed, "failed": failed}
 
 
-# ── Report 엔드포인트 ─────────────────────────────────────────────────────────
+# ── Report ────────────────────────────────────────────────────────────────────
 @app.get("/report/daily", tags=["Report"])
 async def daily_report(db: AsyncSession = Depends(get_db)):
     return await send_daily_report(db)
@@ -316,27 +260,23 @@ async def monthly_report(db: AsyncSession = Depends(get_db)):
 
 @app.post("/trade/close-expired", tags=["Trade"])
 async def close_expired(db: AsyncSession = Depends(get_db)):
-    """보유기간 초과 포지션 수동 청산"""
     closed = await check_and_close_expired_positions(db)
     return {"message": f"{len(closed)}건 청산", "data": closed}
 
 
-# ── 자동 손절 엔드포인트 ──────────────────────────────────────────────────────
 @app.post("/trade/auto-stoploss", tags=["Trade"])
 async def auto_stoploss(db: AsyncSession = Depends(get_db)):
     executed = await check_and_execute_stop_loss(db)
     return {"message": f"자동 손절 실행: {len(executed)}건", "data": executed}
 
 
-# ── 모니터링 엔드포인트 ───────────────────────────────────────────────────────
+# ── Monitor ───────────────────────────────────────────────────────────────────
 @app.get("/monitor/health", tags=["Monitor"])
 async def full_health_check():
     import os
-    result = await run_health_check_and_notify(
-        AsyncSessionLocal,
-        os.getenv("REDIS_URL", "redis://redis:6379/0"),
+    return await run_health_check_and_notify(
+        AsyncSessionLocal, os.getenv("REDIS_URL", "redis://redis:6379/0")
     )
-    return result
 
 
 @app.get("/monitor/errors", tags=["Monitor"])
@@ -344,7 +284,7 @@ async def recent_errors():
     return {"errors": get_recent_errors()}
 
 
-# ── 자금 배분 엔드포인트 ──────────────────────────────────────────────────────
+# ── Allocation ────────────────────────────────────────────────────────────────
 @app.get("/allocation", tags=["Allocation"])
 async def get_allocation():
     return get_allocation_summary()
@@ -359,17 +299,11 @@ async def calc_order_size(
     from trader.allocation import get_order_amount
     qty    = calc_quantity_by_budget(strategy, price, confidence)
     amount = get_order_amount(strategy, confidence)
-    return {
-        "strategy":   strategy,
-        "price":      price,
-        "confidence": confidence,
-        "quantity":   qty,
-        "amount":     amount,
-        "total_cost": qty * price,
-    }
+    return {"strategy": strategy, "price": price, "confidence": confidence,
+            "quantity": qty, "amount": amount, "total_cost": qty * price}
 
 
-# ── Backtest 엔드포인트 ───────────────────────────────────────────────────────
+# ── Backtest ──────────────────────────────────────────────────────────────────
 @app.get("/backtest", tags=["Backtest"])
 async def backtest_single(
     code:       str = Query(...),
@@ -395,7 +329,143 @@ async def backtest_multi(
     return await run_multi_backtest(db, codes, strategy, start_date, end_date)
 
 
-# ── Extended Strategy 엔드포인트 ──────────────────────────────────────────────
+@app.post("/backtest/grid-search", tags=["Backtest"])
+async def backtest_grid_search(
+    codes:      list[str] = Query(...,    description="백테스트 종목 코드 목록"),
+    strategy:   str       = Query("breakout"),
+    start_date: str       = Query(...),
+    end_date:   str       = Query(...),
+    top_n:      int       = Query(20, ge=5, le=50),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    파라미터 그리드 서치 — 최적 파라미터 조합 탐색.
+
+    breakout 기준 108개, ma_cross 54개, rsi_reversal 36개 조합을 탐색하고
+    profit_factor 상위 top_n 결과를 반환합니다.
+
+    ⚠️ 종목 수 × 조합 수만큼 시간이 소요됩니다. 3~5종목 권장.
+    """
+    result = await run_grid_search(db, codes, strategy, start_date, end_date, top_n)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+# ── Performance (B단계 신규) ───────────────────────────────────────────────────
+@app.get("/performance/by-strategy", tags=["Performance"])
+async def performance_by_strategy(
+    days: int = Query(30, ge=1, le=365, description="최근 N일"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    전략별 실제 거래 성과를 집계합니다.
+
+    DB의 실제 SELL 체결 내역을 Signal.strategy로 그룹핑하여
+    전략별 승률·평균 수익률·총 손익·평균 보유일 등을 반환합니다.
+    """
+    from datetime import datetime, timedelta
+    import pytz
+    KST = pytz.timezone("Asia/Seoul")
+
+    now_kst  = datetime.now(KST)
+    today_kst = now_kst.replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff_kst = today_kst - timedelta(days=days - 1)
+    cutoff_utc = cutoff_kst.astimezone(pytz.utc).replace(tzinfo=None)
+
+    # 기간 내 모든 SELL 체결
+    sells = (await db.execute(
+        select(Trade).where(and_(
+            Trade.order_type == "SELL",
+            Trade.status == "FILLED",
+            Trade.created_at >= cutoff_utc,
+        ))
+    )).scalars().all()
+
+    strategy_data: dict[str, list] = {}
+
+    for sell in sells:
+        # 해당 signal의 strategy 조회
+        sig = (await db.execute(
+            select(Signal).where(Signal.id == sell.signal_id)
+        )).scalars().first()
+        strategy = sig.strategy if sig else "unknown"
+
+        # 매수 이력으로 평균 매수가 계산
+        buy_trades = (await db.execute(
+            select(Trade).where(and_(
+                Trade.signal_id == sell.signal_id,
+                Trade.order_type == "BUY",
+                Trade.status == "FILLED",
+            ))
+        )).scalars().all()
+
+        if not buy_trades:
+            continue
+
+        total_qty = sum(t.quantity for t in buy_trades)
+        avg_buy   = sum(t.price * t.quantity for t in buy_trades) / total_qty
+        buy_comm  = sum(t.commission or 0 for t in buy_trades)
+        profit_pct   = (sell.price / avg_buy - 1) * 100
+        net_profit   = (sell.price - avg_buy) * sell.quantity - buy_comm - (sell.commission or 0)
+        entry_date   = min(t.created_at for t in buy_trades)
+        hold_hours   = (sell.created_at - entry_date).total_seconds() / 3600
+        hold_days    = hold_hours / 24
+
+        if strategy not in strategy_data:
+            strategy_data[strategy] = []
+        strategy_data[strategy].append({
+            "profit_pct": profit_pct,
+            "net_profit": net_profit,
+            "hold_days":  hold_days,
+            "exit_reason": "익절" if profit_pct > 0 else "손절",
+        })
+
+    # 전략별 집계
+    result = {}
+    for strategy, trades in strategy_data.items():
+        profits   = [t["profit_pct"] for t in trades]
+        wins      = [p for p in profits if p > 0]
+        losses    = [p for p in profits if p <= 0]
+        net_total = sum(t["net_profit"] for t in trades)
+        avg_hold  = sum(t["hold_days"] for t in trades) / len(trades)
+
+        avg_win  = sum(wins) / len(wins) if wins else 0
+        avg_loss = sum(losses) / len(losses) if losses else 0
+        pf       = abs(avg_win / avg_loss) if avg_loss else 99.0
+
+        result[strategy] = {
+            "total_trades":    len(trades),
+            "win_count":       len(wins),
+            "lose_count":      len(losses),
+            "win_rate":        round(len(wins) / len(profits) * 100, 1) if profits else 0,
+            "avg_profit_pct":  round(sum(profits) / len(profits), 2) if profits else 0,
+            "avg_win_pct":     round(avg_win, 2),
+            "avg_loss_pct":    round(avg_loss, 2),
+            "profit_factor":   round(pf, 2),
+            "total_net_profit": round(net_total, 0),
+            "avg_hold_days":   round(avg_hold, 1),
+        }
+
+    # 전체 합산
+    all_profits   = [t["profit_pct"] for ts in strategy_data.values() for t in ts]
+    all_net       = sum(t["net_profit"] for ts in strategy_data.values() for t in ts)
+    all_wins      = [p for p in all_profits if p > 0]
+    all_losses    = [p for p in all_profits if p <= 0]
+    overall_pf    = abs((sum(all_wins)/len(all_wins)) / (sum(all_losses)/len(all_losses))) \
+                    if all_losses and all_wins else 99.0
+
+    return {
+        "period_days":     days,
+        "total_trades":    len(all_profits),
+        "total_win_rate":  round(len(all_wins) / len(all_profits) * 100, 1) if all_profits else 0,
+        "total_net_profit": round(all_net, 0),
+        "overall_profit_factor": round(overall_pf, 2),
+        "by_strategy":     result,
+    }
+
+
+# ── Extended Strategy ─────────────────────────────────────────────────────────
 @app.post("/strategy/extended", tags=["Strategy"])
 async def strategy_extended(
     top_n: int = Query(80, ge=1, le=150),
@@ -405,28 +475,17 @@ async def strategy_extended(
     candidates = await run_scanner(db, top_n=top_n)
     signals    = await run_extended_strategy(db, candidates, strategies)
     await notify_signals_summary(signals)
-    return {
-        "message":    "확장 전략 실행 완료",
-        "candidates": len(candidates),
-        "signals":    len(signals),
-        "data":       signals,
-    }
+    return {"message": "확장 전략 실행 완료",
+            "candidates": len(candidates), "signals": len(signals), "data": signals}
 
 
-# ── Scheduler 엔드포인트 ──────────────────────────────────────────────────────
+# ── Scheduler ─────────────────────────────────────────────────────────────────
 @app.get("/scheduler/jobs", tags=["Scheduler"])
 async def list_jobs():
     sch = create_scheduler()
-    return {
-        "jobs": [
-            {
-                "id":       j.id,
-                "name":     j.name,
-                "next_run": str(j.next_run_time) if hasattr(j, "next_run_time") else None,
-            }
-            for j in sch.get_jobs()
-        ]
-    }
+    return {"jobs": [{"id": j.id, "name": j.name,
+                      "next_run": str(j.next_run_time) if hasattr(j, "next_run_time") else None}
+                     for j in sch.get_jobs()]}
 
 
 @app.post("/scheduler/run-now", tags=["Scheduler"])
@@ -436,7 +495,7 @@ async def run_now(db: AsyncSession = Depends(get_db)):
     return {"message": "수동 실행 완료"}
 
 
-# ── AI Analysis 엔드포인트 ────────────────────────────────────────────────────
+# ── AI Analysis ───────────────────────────────────────────────────────────────
 @app.post("/ai/analyze/{signal_id}", tags=["AI Analysis"])
 async def ai_analyze_signal(signal_id: str, db: AsyncSession = Depends(get_db)):
     result = await analyze_signal(db, signal_id)
@@ -451,40 +510,29 @@ async def ai_analyze_all(db: AsyncSession = Depends(get_db)):
     return {"message": f"AI 분석 완료: {len(results)}건", "data": results}
 
 
-# ── Notification 엔드포인트 ───────────────────────────────────────────────────
+# ── Notification ──────────────────────────────────────────────────────────────
 @app.post("/notification/test", tags=["Notification"])
 async def notification_test():
     ok = await notify_test()
     if not ok:
-        raise HTTPException(
-            status_code=400,
-            detail="전송 실패 — TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 확인",
-        )
-    return {"message": "텔레그램 테스트 메시지 전송 완료"}
+        raise HTTPException(status_code=400, detail="전송 실패 — 토큰/ChatID 확인")
+    return {"message": "텔레그램 테스트 전송 완료"}
 
 
 @app.post("/notification/signal/{signal_id}", tags=["Notification"])
 async def notify_signal_by_id(signal_id: str, db: AsyncSession = Depends(get_db)):
-    stmt = select(Signal).where(Signal.id == signal_id)
-    row  = (await db.execute(stmt)).scalars().first()
+    row = (await db.execute(select(Signal).where(Signal.id == signal_id))).scalars().first()
     if not row:
         raise HTTPException(status_code=404, detail="신호를 찾을 수 없습니다")
-    sig = {
-        "code":         row.code,
-        "name":         row.name,
-        "signal_type":  row.signal_type,
-        "strategy":     row.strategy,
-        "price":        row.price,
-        "target_price": row.target_price,
-        "stop_loss":    row.stop_loss,
-        "reason":       row.reason,
-        "confidence":   row.confidence,
-    }
-    ok = await notify_signal(sig)
+    ok = await notify_signal({
+        "code": row.code, "name": row.name, "signal_type": row.signal_type,
+        "strategy": row.strategy, "price": row.price, "target_price": row.target_price,
+        "stop_loss": row.stop_loss, "reason": row.reason, "confidence": row.confidence,
+    })
     return {"message": "전송 완료" if ok else "전송 실패"}
 
 
-# ── Trade 엔드포인트 ──────────────────────────────────────────────────────────
+# ── Trade ─────────────────────────────────────────────────────────────────────
 @app.post("/trade/order", tags=["Trade"])
 async def create_order(
     signal_id: str,
@@ -517,11 +565,7 @@ async def get_stock_price(code: str):
 @app.get("/trade/stop-loss-check", tags=["Trade"])
 async def stop_loss_check(db: AsyncSession = Depends(get_db)):
     alerts = await check_stop_loss(db)
-    return {
-        "alert_count": len(alerts),
-        "mode":        "모의투자" if IS_MOCK else "실전투자",
-        "data":        alerts,
-    }
+    return {"alert_count": len(alerts), "mode": "모의투자" if IS_MOCK else "실전투자", "data": alerts}
 
 
 @app.get("/trades", tags=["Trade"])
@@ -529,32 +573,22 @@ async def list_trades(
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
-    stmt = (
-        select(Trade)
-        .order_by(Trade.created_at.desc())
-        .limit(limit)
-    )
-    rows = (await db.execute(stmt)).scalars().all()
+    rows = (await db.execute(
+        select(Trade).order_by(Trade.created_at.desc()).limit(limit)
+    )).scalars().all()
     return {
         "count": len(rows),
-        "mode":  "모의투자" if IS_MOCK else "실전투자",
+        "mode": "모의투자" if IS_MOCK else "실전투자",
         "data": [
             {
-                "id":              r.id,
-                "signal_id":       r.signal_id,
-                "code":            r.code,
-                "name":            r.name,
-                "order_type":      r.order_type,
-                "price":           r.price,
-                "quantity":        r.quantity,
-                "amount":          r.amount,
-                "commission":      r.commission,
-                "real_profit":     r.real_profit,
-                "status":          r.status,
-                "is_simulation":   r.is_simulation,
+                "id": r.id, "signal_id": r.signal_id, "code": r.code, "name": r.name,
+                "order_type": r.order_type, "price": r.price,
+                "quantity": r.quantity, "amount": r.amount,
+                "commission": r.commission, "real_profit": r.real_profit,
+                "status": r.status, "is_simulation": r.is_simulation,
                 "broker_order_id": r.broker_order_id,
-                "created_at":      r.created_at.isoformat() if r.created_at else None,
-                "filled_at":       r.filled_at.isoformat() if r.filled_at else None,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "filled_at": r.filled_at.isoformat() if r.filled_at else None,
             }
             for r in rows
         ],
