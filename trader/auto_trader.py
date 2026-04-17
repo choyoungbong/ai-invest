@@ -1,24 +1,21 @@
 """
-Auto Trader – 신호 발생 시 자동 매수 실행 (분할매수 지원)
+Auto Trader – 신호 발생 시 자동 매수 실행
 
-분할매수 전략:
-  1차 매수: 신호 발생 즉시 예산의 SPLIT_BUY_RATIO(기본 60%) 만큼 매수
-  2차 매수: 1차 매수 후 SPLIT_BUY_MIN_MINUTES 경과 &
-            SPLIT_BUY_TRIGGER_PCT(+0.3%) 이상 상승 확인 시 나머지 매수
+[v4] skip_overtrading_check — 2차 분할매수 재진입 제한 차단 버그 수정
+[A단계] ATR 기반 투자금 자동 조정
+[B단계] allocation.py 전략별 자금 배분 실제 연결
 
-[버그 수정 v4] 2차 분할매수 재진입 제한 차단 문제 수정
-  문제: 2차 매수에서 can_buy(skip_position_check=True) 호출 시에도
-        check_overtrading()의 일반 재진입 제한(REENTRY_MINUTES)에 걸려 차단됨
-        "[035420] 2차 매수 차단: 동일 종목 재진입 제한 (잔여 97분)"
-  원인: 2차 매수는 신규 종목 진입이 아닌 기존 포지션 추가인데,
-        1차 매수 후 REENTRY_MINUTES(120분)가 경과하지 않아 차단
-  수정: can_buy(skip_position_check=True, skip_overtrading_check=True)
-        → 포지션 수 체크 + 재진입 제한 모두 건너뜀
-        → 일일 손실 한도 / 블랙리스트는 그대로 적용
+투자금 결정 우선순위:
+  1. allocation.get_order_amount(strategy, confidence) → 전략·신뢰도 기반 금액
+  2. _calc_atr_adjusted_amount()                      → ATR 변동성 기반 추가 조정
+  3. _phase1_amount()                                 → 분할매수 1차 비율 적용
 
-[이전 수정 이력]
-  v3: skip_position_check로 MAX_POSITIONS 충돌 해결
-  v2: 기존 버그 수정
+예시 (TOTAL_BUDGET=3,000,000 / breakout=60% / 신뢰도 0.8):
+  전략 예산   = 3,000,000 × 60% = 1,800,000원
+  1회 최대    = 1,800,000 × 20% = 360,000원
+  신뢰도 100% = 360,000원
+  ATR 3.0%    = 360,000 × (2.0/3.0) = 240,000원  ← 최종 투자금
+  1차 매수    = 240,000 × 60% = 144,000원
 """
 import logging
 import os
@@ -26,7 +23,7 @@ import uuid
 from datetime import datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, func
+from sqlalchemy import select, and_
 
 from api.models import Signal, Trade
 from trader import kis_client as kis
@@ -35,35 +32,84 @@ from notification.service import send_message
 logger = logging.getLogger(__name__)
 
 # ── 환경변수 ───────────────────────────────────────────────────────────────────
-AUTO_TRADE_ENABLED    = os.getenv("AUTO_TRADE_ENABLED",    "true").lower() == "true"
-MAX_AMOUNT_PER_STOCK  = int(os.getenv("MAX_AMOUNT_PER_STOCK", "300000"))
-TARGET_PROFIT_PCT     = float(os.getenv("TARGET_PROFIT_PCT",  "0.05"))
-STOP_LOSS_PCT         = float(os.getenv("STOP_LOSS_PCT",      "-0.02"))
+AUTO_TRADE_ENABLED   = os.getenv("AUTO_TRADE_ENABLED",   "true").lower() == "true"
+MAX_AMOUNT_PER_STOCK = int(os.getenv("MAX_AMOUNT_PER_STOCK", "300000"))   # fallback
+TARGET_PROFIT_PCT    = float(os.getenv("TARGET_PROFIT_PCT",  "0.05"))
+STOP_LOSS_PCT        = float(os.getenv("STOP_LOSS_PCT",      "-0.02"))
 
-SPLIT_BUY_ENABLED      = os.getenv("SPLIT_BUY_ENABLED",      "true").lower() == "true"
-SPLIT_BUY_RATIO        = float(os.getenv("SPLIT_BUY_RATIO",        "0.6"))
-SPLIT_BUY_TRIGGER_PCT  = float(os.getenv("SPLIT_BUY_TRIGGER_PCT",  "0.003"))
-SPLIT_BUY_MIN_MINUTES  = int(os.getenv("SPLIT_BUY_MIN_MINUTES",    "5"))
-SPLIT_BUY_MAX_MINUTES  = int(os.getenv("SPLIT_BUY_MAX_MINUTES",    "30"))
-MAX_PHASE2_RISE_PCT    = float(os.getenv("MAX_PHASE2_RISE_PCT",    "0.03"))
+SPLIT_BUY_ENABLED     = os.getenv("SPLIT_BUY_ENABLED",     "true").lower() == "true"
+SPLIT_BUY_RATIO       = float(os.getenv("SPLIT_BUY_RATIO",       "0.6"))
+SPLIT_BUY_TRIGGER_PCT = float(os.getenv("SPLIT_BUY_TRIGGER_PCT", "0.003"))
+SPLIT_BUY_MIN_MINUTES = int(os.getenv("SPLIT_BUY_MIN_MINUTES",   "5"))
+SPLIT_BUY_MAX_MINUTES = int(os.getenv("SPLIT_BUY_MAX_MINUTES",   "45"))
+MAX_PHASE2_RISE_PCT   = float(os.getenv("MAX_PHASE2_RISE_PCT",   "0.03"))
 
+# ── ATR 투자금 조정 파라미터 (A단계) ──────────────────────────────────────────
+ATR_AMOUNT_ADJUST_ENABLED = os.getenv("ATR_AMOUNT_ADJUST_ENABLED", "true").lower() == "true"
+ATR_BASE_PCT              = float(os.getenv("ATR_BASE_PCT",  "2.0"))
+ATR_MIN_RATIO             = float(os.getenv("ATR_MIN_RATIO", "0.5"))
+
+
+# ── B단계: 전략 기반 투자금 ────────────────────────────────────────────────────
+
+def _get_strategy_amount(strategy: str, confidence: float) -> int:
+    """
+    allocation.py의 get_order_amount()로 전략·신뢰도 기반 투자금을 반환합니다.
+    import 실패 시 MAX_AMOUNT_PER_STOCK fallback.
+
+    신뢰도 등급:
+      0.7+  → 전략예산 × MAX_SINGLE_TRADE_PCT × 100%
+      0.4~  → 전략예산 × MAX_SINGLE_TRADE_PCT × 60%
+      ~0.4  → 전략예산 × MAX_SINGLE_TRADE_PCT × 30%
+    """
+    try:
+        from trader.allocation import get_order_amount
+        amount = get_order_amount(strategy, confidence)
+        logger.debug(f"[allocation] {strategy} / 신뢰도 {confidence:.2f} → {amount:,}원")
+        return amount
+    except Exception as e:
+        logger.warning(f"[allocation] import 실패 — fallback: {e}")
+        return MAX_AMOUNT_PER_STOCK
+
+
+# ── A단계: ATR 기반 투자금 조정 ──────────────────────────────────────────────
+
+def _calc_atr_adjusted_amount(base_amount: int, atr_pct: float | None, code: str = "") -> int:
+    """
+    ATR%에 따라 투자금을 동적으로 조정합니다.
+    ATR% ≤ ATR_BASE_PCT: 전액 / 초과 시 비례 축소 (최소 ATR_MIN_RATIO 보장)
+    """
+    if not ATR_AMOUNT_ADJUST_ENABLED or atr_pct is None or atr_pct <= 0:
+        return base_amount
+    if atr_pct <= ATR_BASE_PCT:
+        return base_amount
+
+    ratio    = max(min(ATR_BASE_PCT / atr_pct, 1.0), ATR_MIN_RATIO)
+    adjusted = int(base_amount * ratio)
+    logger.info(
+        f"[{code}] ATR 투자금 조정: {base_amount:,}원 × {ratio:.2f} = {adjusted:,}원 "
+        f"(ATR% {atr_pct:.2f}%)"
+    )
+    return adjusted
+
+
+# ── 수량 / 분할매수 금액 ──────────────────────────────────────────────────────
 
 def calc_quantity(price: float, max_amount: int) -> int:
     if price <= 0:
         return 0
-    qty = int(max_amount // price)
-    return max(qty, 1)
+    return max(int(max_amount // price), 1)
 
 
-def _phase1_amount() -> int:
-    if SPLIT_BUY_ENABLED:
-        return int(MAX_AMOUNT_PER_STOCK * SPLIT_BUY_RATIO)
-    return MAX_AMOUNT_PER_STOCK
+def _phase1_amount(total: int) -> int:
+    return int(total * SPLIT_BUY_RATIO) if SPLIT_BUY_ENABLED else total
 
 
-def _phase2_amount() -> int:
-    return MAX_AMOUNT_PER_STOCK - _phase1_amount()
+def _phase2_amount(total: int) -> int:
+    return total - _phase1_amount(total)
 
+
+# ── 포지션 보유 확인 ──────────────────────────────────────────────────────────
 
 async def _has_open_position(db: AsyncSession, code: str) -> bool:
     buy_trades = (await db.execute(
@@ -73,22 +119,22 @@ async def _has_open_position(db: AsyncSession, code: str) -> bool:
             Trade.status == "FILLED",
         ))
     )).scalars().all()
-
     if not buy_trades:
         return False
-
     for buy in buy_trades:
         sell = (await db.execute(
             select(Trade).where(and_(
                 Trade.signal_id == buy.signal_id,
                 Trade.order_type == "SELL",
-                Trade.status == "FILLED",
+                Trade.status.in_(["FILLED", "CLOSED"]),
             ))
         )).scalars().first()
         if not sell:
             return True
     return False
 
+
+# ── 매수 실행 ─────────────────────────────────────────────────────────────────
 
 async def _execute_buy(
     db: AsyncSession,
@@ -102,7 +148,7 @@ async def _execute_buy(
 ) -> dict:
     quantity = calc_quantity(current_price, amount)
     if quantity <= 0:
-        logger.warning(f"[{code}] 수량 계산 0 — 매수 건너뜀 (price={current_price}, amount={amount})")
+        logger.warning(f"[{code}] 수량 0 — 매수 건너뜀 (price={current_price}, amount={amount})")
         return {}
 
     actual_amount = current_price * quantity
@@ -110,7 +156,7 @@ async def _execute_buy(
     try:
         result = await kis.buy_order(code, quantity, order_type="01")
     except Exception as e:
-        logger.error(f"[{code}] {phase}차 매수 주문 실패: {e}")
+        logger.error(f"[{code}] {phase}차 매수 실패: {e}")
         return {}
 
     trade_id   = str(uuid.uuid4())
@@ -139,78 +185,75 @@ async def _execute_buy(
     )
 
     return {
-        "trade_id":  trade_id,
-        "code":      code,
-        "name":      name,
-        "price":     current_price,
-        "quantity":  quantity,
-        "amount":    actual_amount,
-        "phase":     phase,
-        "status":    status,
-        "order_no":  result.get("order_no", ""),
-        "success":   result["success"],
+        "trade_id": trade_id, "code": code, "name": name,
+        "price": current_price, "quantity": quantity, "amount": actual_amount,
+        "phase": phase, "status": status,
+        "order_no": result.get("order_no", ""), "success": result["success"],
     }
 
+
+# ── 신호 자동 매수 ────────────────────────────────────────────────────────────
 
 async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[dict]:
     """
     신호 목록을 받아 자동 매수 주문을 실행합니다.
-    1차 매수 — 모든 리스크 체크 적용 (포지션 수 + 재진입 제한 포함)
+
+    투자금 결정:
+      [B단계] allocation.get_order_amount(strategy, confidence) → 전략·신뢰도 기반
+      [A단계] _calc_atr_adjusted_amount() → ATR 변동성 추가 조정
     """
     if not signals:
         return []
-
     if not AUTO_TRADE_ENABLED:
-        logger.info("AUTO_TRADE_ENABLED=false — 자동 주문 비활성화 상태")
+        logger.info("AUTO_TRADE_ENABLED=false")
         return []
 
     from trader.risk_manager import can_buy, check_slippage
-    # 1차 매수: skip_position_check=False, skip_overtrading_check=False (기본 — 모든 체크)
     buyable, reason = await can_buy(db)
     if not buyable:
         logger.info(f"매수 차단: {reason}")
-        await send_message(
-            f"⛔ <b>[AI INVEST] 매수 차단</b>\n"
-            f"사유: {reason}"
-        )
+        await send_message(f"⛔ <b>[AI INVEST] 매수 차단</b>\n사유: {reason}")
         return []
 
     executed = []
 
     for sig in signals:
-        code      = sig["code"]
-        name      = sig["name"]
-        signal_id = sig["id"]
-        sig_price = sig["price"]
+        code       = sig["code"]
+        name       = sig["name"]
+        signal_id  = sig["id"]
+        sig_price  = sig["price"]
+        strategy   = sig.get("strategy", "breakout")
+        confidence = sig.get("confidence", 0.5)
+        atr_pct    = sig.get("atr_pct")
 
         if await _has_open_position(db, code):
-            logger.info(f"[{code}] 이미 보유 중 — 중복 매수 건너뜀")
+            logger.info(f"[{code}] 이미 보유 중 — 건너뜀")
             continue
 
         from trader.risk_manager import check_blacklist
-        is_blacklisted, bl_reason = await check_blacklist(db, code)
-        if is_blacklisted:
+        is_bl, bl_reason = await check_blacklist(db, code)
+        if is_bl:
             logger.info(f"[{code}] 블랙리스트 — {bl_reason}")
             continue
 
         try:
-            price_data    = await kis.get_current_price(code)
-            current_price = price_data["price"] or int(sig_price)
+            current_price = (await kis.get_current_price(code))["price"] or int(sig_price)
         except Exception as e:
-            logger.warning(f"[{code}] 현재가 조회 실패: {e} — 신호가 사용")
+            logger.warning(f"[{code}] 현재가 조회 실패: {e}")
             current_price = int(sig_price)
 
         slip_exceeded, slip_pct = await check_slippage(sig_price, current_price)
         if slip_exceeded:
-            logger.info(f"[{code}] 슬리피지 초과 ({slip_pct*100:.2f}%) — 건너뜀")
+            logger.info(f"[{code}] 슬리피지 초과 ({slip_pct*100:.2f}%)")
             continue
 
-        phase1_amt = _phase1_amount()
+        # ── 투자금 결정: B단계(전략배분) → A단계(ATR조정) ─────────────────
+        strategy_amount = _get_strategy_amount(strategy, confidence)
+        adjusted_total  = _calc_atr_adjusted_amount(strategy_amount, atr_pct, code)
+        phase1_amt      = _phase1_amount(adjusted_total)
+
         if current_price > phase1_amt:
-            logger.info(
-                f"[{code}] {name} 현재가 {current_price:,}원 > "
-                f"1차 매수금액 {phase1_amt:,}원 — 건너뜀"
-            )
+            logger.info(f"[{code}] 현재가 {current_price:,} > 1차금액 {phase1_amt:,} — 건너뜀")
             await send_message(
                 f"⏭️ <b>[AI INVEST] 매수 건너뜀</b>\n"
                 f"📌 {name} ({code})\n"
@@ -219,11 +262,8 @@ async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[di
             continue
 
         trade_data = await _execute_buy(
-            db, code, name, signal_id,
-            current_price, phase1_amt,
-            phase=1,
+            db, code, name, signal_id, current_price, phase1_amt, phase=1
         )
-
         if not trade_data:
             continue
 
@@ -232,15 +272,19 @@ async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[di
             .where(Signal.id == signal_id)
             .values(is_executed=True)
         )
-
         executed.append(trade_data)
 
+        # 알림
         target_price = round(current_price * (1 + TARGET_PROFIT_PCT))
         stop_price   = round(current_price * (1 + STOP_LOSS_PCT))
         phase2_note  = (
-            f"\n🔄 2차 매수 예정: {SPLIT_BUY_MIN_MINUTES}분 후 "
-            f"+{SPLIT_BUY_TRIGGER_PCT*100:.1f}% 상승 확인 시"
+            f"\n🔄 2차 매수: {SPLIT_BUY_MIN_MINUTES}분 후 +{SPLIT_BUY_TRIGGER_PCT*100:.1f}% 상승 시"
             if SPLIT_BUY_ENABLED else ""
+        )
+        alloc_note = f"\n💼 {strategy.upper()} {confidence:.0%} | 배분 {adjusted_total:,}원"
+        atr_note   = (
+            f" (ATR {atr_pct:.1f}%→{adjusted_total/strategy_amount*100:.0f}% 적용)"
+            if ATR_AMOUNT_ADJUST_ENABLED and atr_pct and adjusted_total < strategy_amount else ""
         )
 
         emoji = "✅" if trade_data["success"] else "❌"
@@ -250,36 +294,32 @@ async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[di
             f"📌 종목: <b>{name} ({code})</b>\n"
             f"💰 매수가: {current_price:,}원\n"
             f"🔢 수량: {trade_data['quantity']}주\n"
-            f"💵 투자금액: {trade_data['amount']:,}원"
-            f"  ({SPLIT_BUY_RATIO*100:.0f}%/{MAX_AMOUNT_PER_STOCK:,}원)\n"
-            f"🎯 목표가: {target_price:,}원 (+{TARGET_PROFIT_PCT*100:.0f}%)\n"
-            f"🛑 손절가: {stop_price:,}원 ({STOP_LOSS_PCT*100:.0f}%)"
+            f"💵 투자금: {trade_data['amount']:,}원{alloc_note}{atr_note}\n"
+            f"🎯 목표가: {target_price:,}원 / 🛑 손절가: {stop_price:,}원"
             f"{phase2_note}\n"
             f"{'✅ 주문 성공' if trade_data['success'] else '❌ 주문 실패'}"
         )
-
         logger.info(
-            f"1차 매수: {code} {name} "
-            f"{trade_data['quantity']}주 @ {current_price:,}원 = {trade_data['amount']:,}원"
+            f"1차 매수: {code} {name} {trade_data['quantity']}주 @ {current_price:,}원 "
+            f"({strategy} / 신뢰도 {confidence:.2f} / 배분 {adjusted_total:,}원)"
         )
 
     await db.commit()
-    logger.info(f"자동 매수 완료: {len(executed)}건 (분할매수 {'활성' if SPLIT_BUY_ENABLED else '비활성'})")
+    logger.info(f"자동 매수 완료: {len(executed)}건")
     return executed
 
 
+# ── 2차 분할매수 체크 ─────────────────────────────────────────────────────────
+
 async def check_and_execute_phase2(db: AsyncSession) -> list[dict]:
     """
-    2차 매수 조건 체크 및 실행.
-    scheduler에서 장중 10분마다 호출합니다.
+    2차 매수 조건 체크 및 실행 (장중 10분마다 호출).
 
-    [버그 수정 v4] skip_overtrading_check=True 추가
-      기존: can_buy(db, code=t1.code, skip_position_check=True)
-            → check_overtrading()이 여전히 실행되어 REENTRY_MINUTES 제한에 걸림
-            → "[035420] 2차 매수 차단: 동일 종목 재진입 제한 (잔여 97분)"
-      수정: can_buy(db, code=t1.code, skip_position_check=True, skip_overtrading_check=True)
-            → 포지션 수 체크 + 재진입 제한 모두 건너뜀
-            → 일일 손실 한도 / 블랙리스트는 그대로 적용
+    [v4] skip_position_check=True + skip_overtrading_check=True
+      2차 매수는 기존 포지션 추가이므로:
+      - MAX_POSITIONS 체크 불필요
+      - 재진입 제한(REENTRY_MINUTES) 불필요
+      - 일일 손실 한도 / 블랙리스트는 항상 적용
     """
     if not SPLIT_BUY_ENABLED:
         return []
@@ -288,9 +328,9 @@ async def check_and_execute_phase2(db: AsyncSession) -> list[dict]:
     if not is_market_open():
         return []
 
-    now_utc     = datetime.utcnow()
-    min_cutoff  = now_utc - timedelta(minutes=SPLIT_BUY_MIN_MINUTES)
-    max_cutoff  = now_utc - timedelta(minutes=SPLIT_BUY_MAX_MINUTES)
+    now_utc    = datetime.utcnow()
+    min_cutoff = now_utc - timedelta(minutes=SPLIT_BUY_MIN_MINUTES)
+    max_cutoff = now_utc - timedelta(minutes=SPLIT_BUY_MAX_MINUTES)
 
     phase1_trades = (await db.execute(
         select(Trade).where(and_(
@@ -306,96 +346,66 @@ async def check_and_execute_phase2(db: AsyncSession) -> list[dict]:
 
     for t1 in phase1_trades:
         # 이미 청산됐는지
-        sell_exists = (await db.execute(
+        if (await db.execute(
             select(Trade).where(and_(
-                Trade.signal_id == t1.signal_id,
-                Trade.order_type == "SELL",
+                Trade.signal_id == t1.signal_id, Trade.order_type == "SELL",
             ))
-        )).scalars().first()
-        if sell_exists:
+        )).scalars().first():
             continue
 
-        # 이미 2차 매수 됐는지
-        phase2_exists = (await db.execute(
+        # 이미 2차 됐는지
+        if (await db.execute(
             select(Trade).where(and_(
-                Trade.signal_id == t1.signal_id,
-                Trade.order_type == "BUY",
-                Trade.phase == 2,
+                Trade.signal_id == t1.signal_id, Trade.order_type == "BUY", Trade.phase == 2,
             ))
-        )).scalars().first()
-        if phase2_exists:
+        )).scalars().first():
             continue
 
-        # ── [버그 수정 v4] skip_position_check=True + skip_overtrading_check=True ──
-        # 2차 매수는 기존 포지션 추가 → 포지션 수 체크 & 재진입 제한 모두 불필요
-        # 일일 손실 한도 / 블랙리스트는 항상 체크
+        # [v4] skip_position_check=True + skip_overtrading_check=True
         buyable, reason = await can_buy(
-            db,
-            code=t1.code,
+            db, code=t1.code,
             skip_position_check=True,
-            skip_overtrading_check=True,  # ← 핵심 수정
+            skip_overtrading_check=True,
         )
         if not buyable:
-            logger.info(f"[{t1.code}] 2차 매수 차단: {reason}")
+            logger.info(f"[{t1.code}] 2차 차단: {reason}")
             continue
 
-        # 현재가 조회
         try:
-            price_data    = await kis.get_current_price(t1.code)
-            current_price = price_data["price"]
+            current_price = (await kis.get_current_price(t1.code))["price"]
         except Exception as e:
-            logger.warning(f"[{t1.code}] 2차 매수 현재가 조회 실패: {e}")
+            logger.warning(f"[{t1.code}] 2차 현재가 실패: {e}")
             continue
 
-        # 조건 2: 트리거 상승 확인
         trigger_price = t1.price * (1 + SPLIT_BUY_TRIGGER_PCT)
         if current_price < trigger_price:
-            logger.debug(
-                f"[{t1.code}] 2차 매수 조건 미충족: "
-                f"현재가 {current_price:,} < 트리거 {trigger_price:,.0f}"
-            )
+            logger.debug(f"[{t1.code}] 2차 트리거 미충족: {current_price:,} < {trigger_price:,.0f}")
             continue
 
-        # 급등 보호
-        max_rise_price = t1.price * (1 + MAX_PHASE2_RISE_PCT)
-        if current_price > max_rise_price:
-            logger.info(
-                f"[{t1.code}] 2차 매수 포기: 급등 감지 "
-                f"현재가 {current_price:,} > 상한 {max_rise_price:,.0f} "
-                f"(+{MAX_PHASE2_RISE_PCT*100:.0f}% 초과)"
-            )
+        if current_price > t1.price * (1 + MAX_PHASE2_RISE_PCT):
+            logger.info(f"[{t1.code}] 2차 포기: 급등")
             continue
 
-        # 목표가 너무 근접
-        near_target = t1.price * (1 + TARGET_PROFIT_PCT) * 0.9
-        if current_price >= near_target:
-            logger.info(f"[{t1.code}] 2차 매수 포기: 목표가 근접")
+        if current_price >= t1.price * (1 + TARGET_PROFIT_PCT) * 0.9:
+            logger.info(f"[{t1.code}] 2차 포기: 목표가 근접")
             continue
 
-        # 손절 근접
-        stop_price = t1.price * (1 + STOP_LOSS_PCT)
-        if current_price <= stop_price:
-            logger.info(f"[{t1.code}] 2차 매수 중단: 손절 근접")
+        if current_price <= t1.price * (1 + STOP_LOSS_PCT):
+            logger.info(f"[{t1.code}] 2차 중단: 손절 근접")
             continue
 
-        # 2차 매수 금액
-        phase2_amt = _phase2_amount()
+        # 1차 매수 총액 역산으로 2차 금액 계산
+        inferred_total = int(t1.amount / SPLIT_BUY_RATIO) if SPLIT_BUY_ENABLED else MAX_AMOUNT_PER_STOCK
+        phase2_amt     = _phase2_amount(inferred_total)
         if phase2_amt <= 0:
-            logger.debug(f"[{t1.code}] 2차 매수 금액 0 — 전액 1차 매수")
             continue
 
         trade_data = await _execute_buy(
             db, t1.code, t1.name, t1.signal_id,
-            current_price, phase2_amt,
-            phase=2,
-            parent_trade_id=t1.id,
+            current_price, phase2_amt, phase=2, parent_trade_id=t1.id
         )
-
         if not trade_data:
-            logger.warning(
-                f"[{t1.code}] {t1.name} 2차 매수 실패 "
-                f"(1차 매수가: {t1.price:,}원, 현재가: {current_price:,}원)"
-            )
+            logger.warning(f"[{t1.code}] 2차 매수 실패")
             continue
 
         await db.commit()
@@ -408,24 +418,16 @@ async def check_and_execute_phase2(db: AsyncSession) -> list[dict]:
         await send_message(
             f"✅ <b>[AI INVEST] 자동 매수 (2차)</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"📌 종목: <b>{t1.name} ({t1.code})</b>\n"
-            f"💰 2차 매수가: {current_price:,}원\n"
-            f"📈 1차 대비: +{(current_price/t1.price-1)*100:.2f}%\n"
-            f"🔢 2차 수량: {trade_data['quantity']}주\n"
-            f"💵 2차 금액: {trade_data['amount']:,}원\n"
+            f"📌 <b>{t1.name} ({t1.code})</b>\n"
+            f"💰 2차 매수가: {current_price:,}원 / 1차 대비 +{(current_price/t1.price-1)*100:.2f}%\n"
+            f"🔢 2차: {trade_data['quantity']}주 / {trade_data['amount']:,}원\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"📊 평균 매수가: {avg_price:,.0f}원\n"
-            f"🔢 총 보유 수량: {total_qty}주\n"
-            f"💵 총 투자금액: {total_amount:,}원"
+            f"📊 평균가: {avg_price:,.0f}원 / 총 {total_qty}주 / {total_amount:,}원"
         )
-
         logger.info(
-            f"2차 매수 완료: {t1.code} {t1.name} "
-            f"{trade_data['quantity']}주 @ {current_price:,}원 "
-            f"(평균가 {avg_price:,.0f}원)"
+            f"2차 매수: {t1.code} {t1.name} @ {current_price:,}원 (평균 {avg_price:,.0f}원)"
         )
 
     if executed:
         logger.info(f"2차 매수 완료: {len(executed)}건")
-
     return executed
