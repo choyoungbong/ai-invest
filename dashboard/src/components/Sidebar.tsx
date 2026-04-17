@@ -3,14 +3,15 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 const nav = [
-  { href: "/",           label: "📊 대시보드" },
-  { href: "/portfolio",  label: "💼 포트폴리오" },
-  { href: "/signals",    label: "🟢 신호 목록" },
-  { href: "/scanner",    label: "🔍 거래대금 스캔" },
-  { href: "/trades",     label: "🛒 체결 내역" },
-  { href: "/charts",     label: "📈 차트 분석" },
-  { href: "/backtest",   label: "🔬 백테스팅" },
-  { href: "/allocation", label: "💰 자금 배분" },
+  { href: "/",             label: "📊 대시보드" },
+  { href: "/portfolio",    label: "💼 포트폴리오" },
+  { href: "/signals",      label: "🟢 신호 목록" },
+  { href: "/scanner",      label: "🔍 거래대금 스캔" },
+  { href: "/trades",       label: "🛒 체결 내역" },
+  { href: "/charts",       label: "📈 차트 분석" },
+  { href: "/performance",  label: "🏆 전략 성과" },   // B단계 신규
+  { href: "/backtest",     label: "🔬 백테스팅" },
+  { href: "/allocation",   label: "💰 자금 배분" },
 ];
 
 export default function Sidebar() {
@@ -44,7 +45,7 @@ export default function Sidebar() {
       </nav>
 
       <div className="px-4 py-3 border-t border-gray-800 text-xs text-gray-600">
-        v2.0.0 · All Phases
+        v3.0.0 · B Stage
       </div>
     </aside>
   );
