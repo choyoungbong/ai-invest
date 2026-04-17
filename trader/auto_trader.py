@@ -3,29 +3,22 @@ Auto Trader – 신호 발생 시 자동 매수 실행 (분할매수 지원)
 
 분할매수 전략:
   1차 매수: 신호 발생 즉시 예산의 SPLIT_BUY_RATIO(기본 60%) 만큼 매수
-  2차 매수: 1차 매수 후 최소 SPLIT_BUY_MIN_MINUTES(5분) 경과 &
-            현재가가 1차 매수가 대비 SPLIT_BUY_TRIGGER_PCT(+0.3%) 이상 상승 확인 시
-            나머지 예산(40%)으로 추가 매수
+  2차 매수: 1차 매수 후 SPLIT_BUY_MIN_MINUTES 경과 &
+            SPLIT_BUY_TRIGGER_PCT(+0.3%) 이상 상승 확인 시 나머지 매수
 
-환경변수:
-  AUTO_TRADE_ENABLED      : true/false (기본 true)
-  MAX_AMOUNT_PER_STOCK    : 종목당 최대 투자금액 (기본 300000원)
-  SPLIT_BUY_ENABLED       : true/false — 분할매수 활성화 (기본 true)
-  SPLIT_BUY_RATIO         : 1차 매수 비율 0.0~1.0 (기본 0.6 = 60%)
-  SPLIT_BUY_TRIGGER_PCT   : 2차 매수 트리거 상승률 (기본 0.003 = +0.3%)
-  SPLIT_BUY_MIN_MINUTES   : 2차 매수 최소 대기 시간 분 (기본 5)
-  SPLIT_BUY_MAX_MINUTES   : 2차 매수 유효 기간 분 — 초과 시 포기 (기본 30)
-  MAX_PHASE2_RISE_PCT     : 2차 매수 최대 허용 상승률 — 급등 보호 (기본 0.03 = +3%)
-                            1차 매수가 대비 이 이상 올랐으면 2차 매수 포기
+[버그 수정 v4] 2차 분할매수 재진입 제한 차단 문제 수정
+  문제: 2차 매수에서 can_buy(skip_position_check=True) 호출 시에도
+        check_overtrading()의 일반 재진입 제한(REENTRY_MINUTES)에 걸려 차단됨
+        "[035420] 2차 매수 차단: 동일 종목 재진입 제한 (잔여 97분)"
+  원인: 2차 매수는 신규 종목 진입이 아닌 기존 포지션 추가인데,
+        1차 매수 후 REENTRY_MINUTES(120분)가 경과하지 않아 차단
+  수정: can_buy(skip_position_check=True, skip_overtrading_check=True)
+        → 포지션 수 체크 + 재진입 제한 모두 건너뜀
+        → 일일 손실 한도 / 블랙리스트는 그대로 적용
 
-[개선 v3]
-  - check_and_execute_phase2에서 can_buy 호출 시 skip_position_check=True 추가
-    기존: can_buy(db, code=t1.code) → MAX_POSITIONS 체크 포함
-          → MAX_POSITIONS=3이고 3종목 모두 1차 매수 완료 상태이면
-            2차 매수 전부 차단 (포지션 수 한도 초과로 판단)
-    수정: can_buy(db, code=t1.code, skip_position_check=True)
-          → 2차 매수는 기존 포지션 추가이므로 MAX_POSITIONS 체크 제외
-          → 일일 손실 한도 / 블랙리스트 / 과매매 방지는 그대로 체크
+[이전 수정 이력]
+  v3: skip_position_check로 MAX_POSITIONS 충돌 해결
+  v2: 기존 버그 수정
 """
 import logging
 import os
@@ -56,7 +49,6 @@ MAX_PHASE2_RISE_PCT    = float(os.getenv("MAX_PHASE2_RISE_PCT",    "0.03"))
 
 
 def calc_quantity(price: float, max_amount: int) -> int:
-    """최대 금액 이내에서 최대 수량을 계산합니다."""
     if price <= 0:
         return 0
     qty = int(max_amount // price)
@@ -64,19 +56,16 @@ def calc_quantity(price: float, max_amount: int) -> int:
 
 
 def _phase1_amount() -> int:
-    """1차 매수 금액"""
     if SPLIT_BUY_ENABLED:
         return int(MAX_AMOUNT_PER_STOCK * SPLIT_BUY_RATIO)
     return MAX_AMOUNT_PER_STOCK
 
 
 def _phase2_amount() -> int:
-    """2차 매수 금액 (나머지)"""
     return MAX_AMOUNT_PER_STOCK - _phase1_amount()
 
 
 async def _has_open_position(db: AsyncSession, code: str) -> bool:
-    """해당 종목의 미청산 BUY가 하나라도 있으면 True"""
     buy_trades = (await db.execute(
         select(Trade).where(and_(
             Trade.code == code,
@@ -97,8 +86,7 @@ async def _has_open_position(db: AsyncSession, code: str) -> bool:
             ))
         )).scalars().first()
         if not sell:
-            return True  # 미청산 포지션 존재
-
+            return True
     return False
 
 
@@ -112,10 +100,6 @@ async def _execute_buy(
     phase: int = 1,
     parent_trade_id: str | None = None,
 ) -> dict:
-    """
-    실제 KIS 매수 주문을 실행하고 Trade 레코드를 저장합니다.
-    Returns: trade_data dict (성공 시) or {} (실패 시)
-    """
     quantity = calc_quantity(current_price, amount)
     if quantity <= 0:
         logger.warning(f"[{code}] 수량 계산 0 — 매수 건너뜀 (price={current_price}, amount={amount})")
@@ -124,13 +108,13 @@ async def _execute_buy(
     actual_amount = current_price * quantity
 
     try:
-        result = await kis.buy_order(code, quantity, order_type="01")  # 시장가
+        result = await kis.buy_order(code, quantity, order_type="01")
     except Exception as e:
         logger.error(f"[{code}] {phase}차 매수 주문 실패: {e}")
         return {}
 
-    trade_id = str(uuid.uuid4())
-    status   = "FILLED" if result["success"] else "FAILED"
+    trade_id   = str(uuid.uuid4())
+    status     = "FILLED" if result["success"] else "FAILED"
 
     from trader.risk_manager import calc_commission
     commission = calc_commission(current_price, quantity, is_buy=True)
@@ -171,13 +155,7 @@ async def _execute_buy(
 async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[dict]:
     """
     신호 목록을 받아 자동 매수 주문을 실행합니다.
-
-    분할매수 활성화 시:
-      1차: 신호가 대비 현재가 슬리피지 확인 후 SPLIT_BUY_RATIO 금액으로 즉시 매수
-      2차: check_and_execute_phase2() 로 별도 실행 (scheduler 호출)
-
-    분할매수 비활성화 시:
-      기존대로 MAX_AMOUNT_PER_STOCK 전액 즉시 매수
+    1차 매수 — 모든 리스크 체크 적용 (포지션 수 + 재진입 제한 포함)
     """
     if not signals:
         return []
@@ -186,9 +164,9 @@ async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[di
         logger.info("AUTO_TRADE_ENABLED=false — 자동 주문 비활성화 상태")
         return []
 
-    # ── 리스크 매니저 통합 체크 (1차 매수 — 포지션 수 체크 포함) ───────────────
     from trader.risk_manager import can_buy, check_slippage
-    buyable, reason = await can_buy(db)  # skip_position_check=False (기본값)
+    # 1차 매수: skip_position_check=False, skip_overtrading_check=False (기본 — 모든 체크)
+    buyable, reason = await can_buy(db)
     if not buyable:
         logger.info(f"매수 차단: {reason}")
         await send_message(
@@ -205,19 +183,16 @@ async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[di
         signal_id = sig["id"]
         sig_price = sig["price"]
 
-        # ── 이미 보유 중인지 확인 ──────────────────────────────────────────
         if await _has_open_position(db, code):
             logger.info(f"[{code}] 이미 보유 중 — 중복 매수 건너뜀")
             continue
 
-        # ── 블랙리스트 확인 ────────────────────────────────────────────────
         from trader.risk_manager import check_blacklist
         is_blacklisted, bl_reason = await check_blacklist(db, code)
         if is_blacklisted:
             logger.info(f"[{code}] 블랙리스트 — {bl_reason}")
             continue
 
-        # ── 현재가 조회 ────────────────────────────────────────────────────
         try:
             price_data    = await kis.get_current_price(code)
             current_price = price_data["price"] or int(sig_price)
@@ -225,13 +200,11 @@ async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[di
             logger.warning(f"[{code}] 현재가 조회 실패: {e} — 신호가 사용")
             current_price = int(sig_price)
 
-        # ── 슬리피지 체크 ──────────────────────────────────────────────────
         slip_exceeded, slip_pct = await check_slippage(sig_price, current_price)
         if slip_exceeded:
             logger.info(f"[{code}] 슬리피지 초과 ({slip_pct*100:.2f}%) — 건너뜀")
             continue
 
-        # ── 최대 금액 초과 종목 제외 ───────────────────────────────────────
         phase1_amt = _phase1_amount()
         if current_price > phase1_amt:
             logger.info(
@@ -245,7 +218,6 @@ async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[di
             )
             continue
 
-        # ── 1차 매수 실행 ──────────────────────────────────────────────────
         trade_data = await _execute_buy(
             db, code, name, signal_id,
             current_price, phase1_amt,
@@ -255,7 +227,6 @@ async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[di
         if not trade_data:
             continue
 
-        # 신호 실행 표시
         await db.execute(
             Signal.__table__.update()
             .where(Signal.id == signal_id)
@@ -264,7 +235,6 @@ async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[di
 
         executed.append(trade_data)
 
-        # ── 텔레그램 1차 매수 알림 ────────────────────────────────────────
         target_price = round(current_price * (1 + TARGET_PROFIT_PCT))
         stop_price   = round(current_price * (1 + STOP_LOSS_PCT))
         phase2_note  = (
@@ -303,21 +273,13 @@ async def check_and_execute_phase2(db: AsyncSession) -> list[dict]:
     2차 매수 조건 체크 및 실행.
     scheduler에서 장중 10분마다 호출합니다.
 
-    조건 (모두 충족 시 실행):
-      1. 1차 매수(phase=1, FILLED) 후 MIN_MINUTES 이상 ~ MAX_MINUTES 미만 경과
-      2. 현재가 >= 1차 매수가 × (1 + SPLIT_BUY_TRIGGER_PCT) — 상승 추세 확인
-      3. 현재가 < 1차 매수가 × (1 + TARGET_PROFIT_PCT) × 0.9 — 목표가 너무 근접하지 않음
-      4. 2차 매수 미실행 (해당 signal_id에 phase=2 BUY 없음)
-      5. 청산 미완료 (해당 signal_id에 SELL 없음)
-      6. 손절 조건 미도달 (현재가 > 손절가)
-
-    [개선 v3] can_buy 호출 시 skip_position_check=True 추가
-      기존: can_buy(db, code=t1.code) — MAX_POSITIONS 체크 포함
-            → MAX_POSITIONS=3, 3종목 모두 1차 매수 완료 상태이면
-              2차 매수 전부 차단되는 문제 발생
-      수정: can_buy(db, code=t1.code, skip_position_check=True)
-            → 2차 매수는 기존 보유 종목에 추가 매수이므로 포지션 수 제한 불필요
-            → 일일 손실 한도 / 블랙리스트 / 과매매 방지는 그대로 적용
+    [버그 수정 v4] skip_overtrading_check=True 추가
+      기존: can_buy(db, code=t1.code, skip_position_check=True)
+            → check_overtrading()이 여전히 실행되어 REENTRY_MINUTES 제한에 걸림
+            → "[035420] 2차 매수 차단: 동일 종목 재진입 제한 (잔여 97분)"
+      수정: can_buy(db, code=t1.code, skip_position_check=True, skip_overtrading_check=True)
+            → 포지션 수 체크 + 재진입 제한 모두 건너뜀
+            → 일일 손실 한도 / 블랙리스트는 그대로 적용
     """
     if not SPLIT_BUY_ENABLED:
         return []
@@ -330,21 +292,20 @@ async def check_and_execute_phase2(db: AsyncSession) -> list[dict]:
     min_cutoff  = now_utc - timedelta(minutes=SPLIT_BUY_MIN_MINUTES)
     max_cutoff  = now_utc - timedelta(minutes=SPLIT_BUY_MAX_MINUTES)
 
-    # phase=1 FILLED 매수 중 MIN~MAX 범위 내
     phase1_trades = (await db.execute(
         select(Trade).where(and_(
             Trade.order_type == "BUY",
             Trade.status == "FILLED",
             Trade.phase == 1,
-            Trade.created_at <= min_cutoff,   # 최소 대기 경과
-            Trade.created_at >= max_cutoff,   # 최대 유효기간 내
+            Trade.created_at <= min_cutoff,
+            Trade.created_at >= max_cutoff,
         ))
     )).scalars().all()
 
     executed = []
 
     for t1 in phase1_trades:
-        # ── 이미 청산됐는지 확인 ────────────────────────────────────────────
+        # 이미 청산됐는지
         sell_exists = (await db.execute(
             select(Trade).where(and_(
                 Trade.signal_id == t1.signal_id,
@@ -354,7 +315,7 @@ async def check_and_execute_phase2(db: AsyncSession) -> list[dict]:
         if sell_exists:
             continue
 
-        # ── 이미 2차 매수 실행됐는지 확인 ──────────────────────────────────
+        # 이미 2차 매수 됐는지
         phase2_exists = (await db.execute(
             select(Trade).where(and_(
                 Trade.signal_id == t1.signal_id,
@@ -365,17 +326,20 @@ async def check_and_execute_phase2(db: AsyncSession) -> list[dict]:
         if phase2_exists:
             continue
 
-        # ── [개선 v3] 2차 매수 가능 여부 — skip_position_check=True ────────
-        #    기존: can_buy(db, code=t1.code) → MAX_POSITIONS 포함 체크
-        #          → 3/3 포지션 모두 채워진 상태이면 2차 매수 차단됨
-        #    수정: skip_position_check=True → 포지션 수 체크 생략
-        #          → 일일 손실 한도, 블랙리스트, 과매매 방지만 체크
-        buyable, reason = await can_buy(db, code=t1.code, skip_position_check=True)
+        # ── [버그 수정 v4] skip_position_check=True + skip_overtrading_check=True ──
+        # 2차 매수는 기존 포지션 추가 → 포지션 수 체크 & 재진입 제한 모두 불필요
+        # 일일 손실 한도 / 블랙리스트는 항상 체크
+        buyable, reason = await can_buy(
+            db,
+            code=t1.code,
+            skip_position_check=True,
+            skip_overtrading_check=True,  # ← 핵심 수정
+        )
         if not buyable:
             logger.info(f"[{t1.code}] 2차 매수 차단: {reason}")
             continue
 
-        # ── 현재가 조회 ────────────────────────────────────────────────────
+        # 현재가 조회
         try:
             price_data    = await kis.get_current_price(t1.code)
             current_price = price_data["price"]
@@ -383,7 +347,7 @@ async def check_and_execute_phase2(db: AsyncSession) -> list[dict]:
             logger.warning(f"[{t1.code}] 2차 매수 현재가 조회 실패: {e}")
             continue
 
-        # ── 조건 2: 트리거 상승 확인 ────────────────────────────────────────
+        # 조건 2: 트리거 상승 확인
         trigger_price = t1.price * (1 + SPLIT_BUY_TRIGGER_PCT)
         if current_price < trigger_price:
             logger.debug(
@@ -392,32 +356,29 @@ async def check_and_execute_phase2(db: AsyncSession) -> list[dict]:
             )
             continue
 
-        # ── 급등 보호 — 최대 상승률 초과 시 2차 매수 포기 ──────────────────
+        # 급등 보호
         max_rise_price = t1.price * (1 + MAX_PHASE2_RISE_PCT)
         if current_price > max_rise_price:
             logger.info(
                 f"[{t1.code}] 2차 매수 포기: 급등 감지 "
-                f"현재가 {current_price:,} > 급등보호 상한 {max_rise_price:,.0f} "
+                f"현재가 {current_price:,} > 상한 {max_rise_price:,.0f} "
                 f"(+{MAX_PHASE2_RISE_PCT*100:.0f}% 초과)"
             )
             continue
 
-        # ── 조건 3: 목표가 너무 근접하지 않음 ──────────────────────────────
+        # 목표가 너무 근접
         near_target = t1.price * (1 + TARGET_PROFIT_PCT) * 0.9
         if current_price >= near_target:
-            logger.info(
-                f"[{t1.code}] 2차 매수 포기: 목표가 근접 "
-                f"(현재가 {current_price:,} ≥ {near_target:,.0f})"
-            )
+            logger.info(f"[{t1.code}] 2차 매수 포기: 목표가 근접")
             continue
 
-        # ── 조건 6: 손절 조건 미도달 ───────────────────────────────────────
+        # 손절 근접
         stop_price = t1.price * (1 + STOP_LOSS_PCT)
         if current_price <= stop_price:
             logger.info(f"[{t1.code}] 2차 매수 중단: 손절 근접")
             continue
 
-        # ── 2차 매수 실행 ──────────────────────────────────────────────────
+        # 2차 매수 금액
         phase2_amt = _phase2_amount()
         if phase2_amt <= 0:
             logger.debug(f"[{t1.code}] 2차 매수 금액 0 — 전액 1차 매수")
@@ -440,7 +401,6 @@ async def check_and_execute_phase2(db: AsyncSession) -> list[dict]:
         await db.commit()
         executed.append(trade_data)
 
-        # ── 가중평균 매수가 계산 ────────────────────────────────────────────
         total_qty    = t1.quantity + trade_data["quantity"]
         avg_price    = (t1.price * t1.quantity + current_price * trade_data["quantity"]) / total_qty
         total_amount = t1.amount + trade_data["amount"]
