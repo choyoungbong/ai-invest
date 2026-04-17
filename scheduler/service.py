@@ -501,4 +501,179 @@ def create_scheduler() -> AsyncIOScheduler:
         id="health_check", name="헬스체크",
     )
 
+    # ── 🇺🇸 미국 ETF 자동매매 스케줄 ────────────────────────────────────────
+    # US_TRADING_ENABLED=false(기본값)이면 각 job 내부에서 즉시 return — 안전
+    # .env에서 US_TRADING_ENABLED=true 로 변경 시 활성화
+
+    # 22:30 개장 직전: 비대상 종목 청산 + 당일 기준 총자산 기록
+    scheduler.add_job(
+        job_us_market_open,
+        CronTrigger(hour=22, minute=30, day_of_week="mon-fri", timezone=KST),
+        id="us_market_open",
+        name="🇺🇸 미국장 개장 (청산+시작)",
+    )
+
+    # 22:35 ~ 04:35: 30분 신호 스캔 (정각+5분, 정각+35분)
+    for h, m in [
+        (22, 35), (23, 5), (23, 35),
+        (0,  5),  (0, 35), (1,  5),  (1, 35),
+        (2,  5),  (2, 35), (3,  5),  (3, 35),
+        (4,  5),  (4, 35),
+    ]:
+        scheduler.add_job(
+            job_us_scan,
+            CronTrigger(hour=h, minute=m, day_of_week="mon-sat", timezone=KST),
+            id=f"us_scan_{h:02d}{m:02d}",
+            name=f"🇺🇸 {h:02d}:{m:02d} 미국 스캔",
+        )
+
+    # 손절/익절 체크: 야간 5분마다 (22:35~23:55)
+    scheduler.add_job(
+        job_us_position_check,
+        CronTrigger(hour="22-23", minute="*/5",
+                    day_of_week="mon-fri", timezone=KST),
+        id="us_pos_night", name="🇺🇸 미국 포지션 체크 (야간)",
+        max_instances=1, coalesce=True,
+    )
+    # 손절/익절 체크: 새벽 5분마다 (00:00~04:50)
+    scheduler.add_job(
+        job_us_position_check,
+        CronTrigger(hour="0-4", minute="*/5",
+                    day_of_week="tue-sat", timezone=KST),
+        id="us_pos_dawn", name="🇺🇸 미국 포지션 체크 (새벽)",
+        max_instances=1, coalesce=True,
+    )
+
+    # 04:55: 미국장 마감 + 일일 결과
+    scheduler.add_job(
+        job_us_market_close,
+        CronTrigger(hour=4, minute=55, day_of_week="tue-sat", timezone=KST),
+        id="us_market_close",
+        name="🇺🇸 미국장 마감",
+    )
+
+    # 미국장 30분 신호 스캔
+    # 22:35 ~ 23:35 (당일), 00:05 ~ 04:35 (익일)
+    for h, m in [
+        (22, 35), (23, 5), (23, 35),
+        (0, 5), (0, 35), (1, 5), (1, 35), (2, 5), (2, 35),
+        (3, 5), (3, 35), (4, 5), (4, 35),
+    ]:
+        scheduler.add_job(
+            job_us_trading_scan,
+            CronTrigger(hour=h, minute=m, day_of_week="mon-sat", timezone=KST),
+            id=f"us_scan_{h:02d}{m:02d}",
+            name=f"🇺🇸 {h:02d}:{m:02d} 미국 스캔",
+        )
+
+    # 미국장 손절/익절 체크 (5분마다, 22:35~04:50)
+    scheduler.add_job(
+        job_us_stop_loss_check,
+        CronTrigger(
+            hour="22-23",
+            minute="*/5",
+            day_of_week="mon-fri",
+            timezone=KST,
+        ),
+        id="us_stoploss_night",
+        name="🇺🇸 미국 손절/익절 (야간)",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        job_us_stop_loss_check,
+        CronTrigger(
+            hour="0-4",
+            minute="*/5",
+            day_of_week="tue-sat",
+            timezone=KST,
+        ),
+        id="us_stoploss_morning",
+        name="🇺🇸 미국 손절/익절 (새벽)",
+        max_instances=1,
+        coalesce=True,
+    )
+
     return scheduler
+
+
+
+# ── 🇺🇸 미국 ETF Job 함수들 ──────────────────────────────────────────────────
+
+async def job_us_market_open():
+    """
+    미국장 개장 (22:30 KST).
+    1. 비대상 종목(TORO, SNDL 등) 자동 청산
+    2. 당일 기준 총자산 기록
+    3. 개장 알림 발송
+    """
+    if os.getenv("US_TRADING_ENABLED", "false").lower() != "true":
+        return
+    try:
+        from trader.us_auto_trader import auto_liquidate_on_open
+        await auto_liquidate_on_open()
+    except Exception as e:
+        logger.error(f"[스케줄러] 🇺🇸 미국장 개장 처리 오류: {e}", exc_info=True)
+        await send_message(
+            f"⚠️ <b>[AI INVEST 🇺🇸] 개장 처리 오류</b>\n{str(e)[:200]}"
+        )
+
+
+async def job_us_scan():
+    """미국 ETF 30분 신호 스캔 + 매수 실행"""
+    if os.getenv("US_TRADING_ENABLED", "false").lower() != "true":
+        return
+    now_kst = datetime.now(KST).strftime("%H:%M")
+    try:
+        async with AsyncSessionLocal() as db:
+            from trader.us_auto_trader import run_us_trading
+            results = await run_us_trading(db)
+        if results:
+            logger.info(f"[스케줄러] 🇺🇸 {now_kst} 미국 매수 {len(results)}건")
+        else:
+            logger.info(f"[스케줄러] 🇺🇸 {now_kst} 미국 신호 없음")
+    except Exception as e:
+        logger.error(f"[스케줄러] 🇺🇸 미국 스캔 오류: {e}", exc_info=True)
+        await send_message(
+            f"⚠️ <b>[AI INVEST 🇺🇸] 스캔 오류</b>\n"
+            f"시각: {now_kst}\n{str(e)[:200]}"
+        )
+
+
+async def job_us_position_check():
+    """미국 ETF 포지션 손절/익절 체크 (5분마다)"""
+    if os.getenv("US_TRADING_ENABLED", "false").lower() != "true":
+        return
+    try:
+        async with AsyncSessionLocal() as db:
+            from trader.us_auto_trader import check_us_positions
+            executed = await check_us_positions(db)
+        if executed:
+            logger.info(f"[스케줄러] 🇺🇸 미국 청산 {len(executed)}건")
+    except Exception as e:
+        logger.error(f"[스케줄러] 🇺🇸 미국 포지션 체크 오류: {e}")
+
+
+async def job_us_market_close():
+    """미국장 마감 (04:55 KST) + 일일 결과 알림"""
+    if os.getenv("US_TRADING_ENABLED", "false").lower() != "true":
+        return
+    try:
+        from strategy.us_strategy import get_daily_status
+        status = get_daily_status()
+        pnl    = status["realized_pnl_usd"]
+        emoji  = "📈" if pnl >= 0 else "📉"
+
+        blocked = ""
+        if status["blocked_symbols"]:
+            blocked = f"\n🚫 연속손절 중단: {', '.join(status['blocked_symbols'])}"
+
+        await send_message(
+            f"🇺🇸 <b>[AI INVEST] 미국장 마감</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{emoji} 실현 손익: ${pnl:+.2f}\n"
+            f"📋 거래 횟수: {status['total_trades']}회"
+            f"{blocked}"
+        )
+    except Exception as e:
+        logger.error(f"[스케줄러] 🇺🇸 미국장 마감 알림 오류: {e}")
