@@ -293,8 +293,8 @@ async def job_stop_loss_check():
 async def job_conditional_sell_eod():
     """
     15:10 조건부 청산
-    - 수익 +1% 미만 포지션 → 당일 청산 (익일 갭다운 리스크 방지)
-    - 수익 +1% 이상 포지션 → 익일 보유 허용 (트레일링 스탑 계속 동작)
+    - 수익 +0.5% 미만 포지션 → 당일 청산 (익일 갭다운 리스크 방지)
+    - 수익 +0.5% 이상 포지션 → 익일 보유 허용 (트레일링 스탑 계속 동작)
     """
     from sqlalchemy import select, and_
     from api.models import Trade
@@ -323,7 +323,7 @@ async def job_conditional_sell_eod():
 
             profit_pct = (current_price / position["avg_buy_price"] - 1) * 100
 
-            if profit_pct >= 1.0:
+            if profit_pct >= 0.5:
                 kept.append(f"{position['name']} ({profit_pct:+.1f}%)")
                 logger.info(f"[{position['code']}] 익일 보유 유지: {profit_pct:+.1f}%")
             else:
