@@ -144,6 +144,27 @@ services:
       # ── 슬리피지 한도 ──────────────────────────────────────────────────────
       SLIPPAGE_LIMIT_PCT: ${SLIPPAGE_LIMIT_PCT:-0.005}
 
+      # ── ATR 변동성 필터 (A단계) ────────────────────────
+      ATR_FILTER_ENABLED: ${ATR_FILTER_ENABLED:-true}
+      ATR_PERIOD: ${ATR_PERIOD:-14}
+      ATR_FILTER_MAX_PCT: ${ATR_FILTER_MAX_PCT:-4.5}
+      ATR_AMOUNT_ADJUST_ENABLED: ${ATR_AMOUNT_ADJUST_ENABLED:-true}
+      ATR_BASE_PCT: ${ATR_BASE_PCT:-2.0}
+      ATR_MIN_RATIO: ${ATR_MIN_RATIO:-0.5}
+
+      # ── DART 공시 필터 (A단계) ─────────────────────────
+      DART_API_KEY: ${DART_API_KEY:-}
+      DISCLOSURE_FILTER_ENABLED: ${DISCLOSURE_FILTER_ENABLED:-true}
+
+      # ── 오후 진입 제한 (A단계) ─────────────────────────
+      AFTERNOON_MIN_CONFIDENCE: ${AFTERNOON_MIN_CONFIDENCE:-0.65}
+      AFTERNOON_MIN_CHANGE: ${AFTERNOON_MIN_CHANGE:-1.5}
+
+      # ── 트레일링 스탑 (이전 단계, 없으면 추가) ──────────
+      TRAILING_STOP_ENABLED: ${TRAILING_STOP_ENABLED:-true}
+      TRAILING_STOP_ACTIVATION_PCT: ${TRAILING_STOP_ACTIVATION_PCT:-0.04}
+      TRAILING_STOP_PCT: ${TRAILING_STOP_PCT:-0.015}
+
     ports:
       - "8000:8000"
     volumes:
