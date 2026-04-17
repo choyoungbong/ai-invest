@@ -593,3 +593,132 @@ async def list_trades(
             for r in rows
         ],
     }
+
+
+# ── 🇺🇸 미국 ETF 자동매매 엔드포인트 ─────────────────────────────────────────
+
+@app.get("/us-trading/status", tags=["US Trading"])
+async def us_trading_status():
+    """
+    미국 자동매매 현재 상태 조회.
+    - 장 운영 여부, 당일 거래 현황, 리스크 상태 포함
+    """
+    from trader.us_kis_client import is_us_market_open, get_us_market_schedule
+    from strategy.us_strategy import get_daily_status, US_ETF_CONFIG
+    import os
+
+    schedule = get_us_market_schedule()
+    daily    = get_daily_status()
+
+    return {
+        "us_trading_enabled": os.getenv("US_TRADING_ENABLED", "false"),
+        "market_schedule":    schedule,
+        "daily_status":       daily,
+        "target_etfs": {
+            sym: {
+                "name":          cfg["name"],
+                "exchange":      cfg["exchange"],
+                "target_profit": f"+{cfg['target_profit']*100:.1f}%",
+                "stop_loss":     f"{cfg['stop_loss']*100:.1f}%",
+                "budget_ratio":  f"{cfg['budget_ratio']*100:.0f}%",
+            }
+            for sym, cfg in US_ETF_CONFIG.items()
+        },
+    }
+
+
+@app.get("/us-trading/balance", tags=["US Trading"])
+async def us_trading_balance():
+    """
+    해외 계좌 잔고 조회.
+    보유 종목 목록, 예수금, 총자산 포함.
+    """
+    try:
+        from trader.us_kis_client import get_us_balance
+        balance = await get_us_balance()
+        return {"success": True, "data": balance}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/us-trading/liquidate", tags=["US Trading"])
+async def us_liquidate(
+    confirm: bool = Query(False, description="반드시 true 전달"),
+):
+    """
+    비대상 종목 수동 청산.
+    SPLG / TQQQ / SOXL 이외의 보유 종목을 전량 시장가 매도합니다.
+
+    ⚠️ confirm=true 필수. 손실 확정될 수 있습니다.
+    """
+    if not confirm:
+        return {
+            "message": "confirm=true 를 붙여야 실행됩니다.",
+            "example": "/us-trading/liquidate?confirm=true",
+        }
+    try:
+        from trader.us_auto_trader import auto_liquidate_on_open
+        results = await auto_liquidate_on_open()
+        return {
+            "success": True,
+            "count":   len(results),
+            "results": results,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/us-trading/scan-now", tags=["US Trading"])
+async def us_scan_now(db: AsyncSession = Depends(get_db)):
+    """
+    미국 ETF 수동 스캔 및 매수 실행.
+    스케줄 외 즉시 신호 탐색이 필요할 때 사용합니다.
+    """
+    from trader.us_kis_client import is_us_market_open
+    if not is_us_market_open():
+        return {"message": "미국 장 외 시간입니다.", "market_open": False}
+    try:
+        from trader.us_auto_trader import run_us_trading
+        results = await run_us_trading(db)
+        return {
+            "message": f"스캔 완료: {len(results)}건 매수",
+            "results": results,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/us-trading/trades", tags=["US Trading"])
+async def us_trading_trades(
+    limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """미국 ETF 체결 내역 조회"""
+    from strategy.us_strategy import US_ETF_CONFIG
+    us_symbols = list(US_ETF_CONFIG.keys())
+
+    rows = (await db.execute(
+        select(Trade)
+        .where(Trade.code.in_(us_symbols))
+        .order_by(Trade.created_at.desc())
+        .limit(limit)
+    )).scalars().all()
+
+    return {
+        "count": len(rows),
+        "data": [
+            {
+                "id":          r.id,
+                "code":        r.code,
+                "name":        r.name,
+                "order_type":  r.order_type,
+                "price":       r.price,
+                "quantity":    r.quantity,
+                "amount":      r.amount,
+                "real_profit": r.real_profit,
+                "status":      r.status,
+                "created_at":  r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+    }
