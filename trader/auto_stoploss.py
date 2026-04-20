@@ -278,6 +278,42 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
 
     await db.commit()
 
+    # ── SELL FAILED 자동 재시도 ──────────────────────────────────────────────
+    retry_rows = (await db.execute(
+        select(Trade.signal_id, Trade.code, Trade.name,
+               func.count(Trade.id).label("cnt"))
+        .where(and_(Trade.order_type == "SELL", Trade.status == "FAILED"))
+        .group_by(Trade.signal_id, Trade.code, Trade.name)
+        .having(func.count(Trade.id) < 3)   # 3회 미만만 재시도
+    )).all()
+
+    for row in retry_rows:
+        if row.signal_id in sold_sids:
+            continue
+        position = await _get_open_position(db, row.signal_id)
+        if not position:
+            continue
+        try:
+            price_data    = await kis.get_current_price(row.code)
+            current_price = price_data["price"]
+        except Exception as e:
+            logger.warning(f"[재시도] 현재가 조회 실패 [{row.code}]: {e}")
+            continue
+        logger.warning(
+            f"[재시도] SELL FAILED {row.cnt}회 → 재주문: {row.code} {row.name} "
+            f"@ {current_price:,}원"
+        )
+        result = await _execute_sell(
+            db, position, current_price,
+            f"🔄 매도 재시도 ({row.cnt+1}차) — 이전 FAILED {row.cnt}회"
+        )
+        if result.get("success"):
+            sold_sids.add(row.signal_id)
+            logger.info(f"[재시도] 재주문 성공: {row.code}")
+        else:
+            logger.warning(f"[재시도] 재주문 실패: {row.code}")
+
+
     # 미청산 BUY signal_id 조회
     signal_ids_q = (await db.execute(
         select(Trade.signal_id).where(and_(

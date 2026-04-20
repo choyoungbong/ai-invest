@@ -432,6 +432,16 @@ def create_scheduler() -> AsyncIOScheduler:
         CronTrigger(hour=15, minute=25, timezone=KST),
         id="sync_positions_close", name="포지션 싱크 (장 종료)",
     )
+    # ── 포지션 싱크: 장 중 30분마다 ────────────────────────────────────────
+    scheduler.add_job(
+        job_sync_positions,
+        CronTrigger(hour="9-15", minute="*/30", day_of_week="mon-fri", timezone=KST),
+        id="sync_positions_intraday",
+        name="포지션 싱크 (장 중 30분)",
+        max_instances=1,
+        coalesce=True,
+    )
+
 
     # ── 손절/익절/트레일링 체크: 5분마다 ────────────────────────────────────
     scheduler.add_job(

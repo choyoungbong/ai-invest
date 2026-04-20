@@ -435,6 +435,16 @@ def calc_net_profit(buy_price: float, sell_price: float, quantity: int) -> dict:
 # ── KIS 실잔고 ↔ DB 포지션 싱크 ──────────────────────────────────────────────
 
 async def sync_positions_with_kis(db: AsyncSession) -> dict:
+    """
+    KIS 실잔고 ↔ DB 포지션 동기화.
+
+    처리 케이스:
+      1. 좀비 포지션 (DB OPEN, KIS 없음)
+         - SELL 레코드 있고 FAILED → CLOSED 보정
+         - SELL 레코드 없음 → KIS 평균단가 기준 SELL CLOSED 삽입 + 수익 계산
+      2. 미추적 포지션 (KIS 있음, DB OPEN 없음) → 텔레그램 경고
+    """
+    import uuid as _uuid
     try:
         from trader import kis_client as kis
         balance  = await kis.get_balance()
@@ -443,8 +453,10 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
         logger.error(f"[SYNC] KIS 잔고 조회 실패: {e}")
         return {"error": str(e)}
 
-    kis_codes = {h["code"] for h in holdings}
+    kis_map   = {h["code"]: h for h in holdings}   # code → holding info
+    kis_codes = set(kis_map.keys())
 
+    # DB에서 미청산 포지션 수집
     open_codes_result = (await db.execute(
         select(Trade.code).where(and_(
             Trade.order_type == "BUY",
@@ -453,6 +465,8 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
     )).scalars().all()
 
     db_open_codes = set()
+    db_open_sids: dict[str, list] = {}   # code → [signal_id, ...]
+
     for code in open_codes_result:
         buy_sids = (await db.execute(
             select(Trade.signal_id).where(and_(
@@ -461,6 +475,7 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
                 Trade.status.in_(["FILLED", "PARTIAL"]),
             )).distinct()
         )).scalars().all()
+
         for sid in buy_sids:
             sold = (await db.execute(
                 select(Trade).where(and_(
@@ -471,23 +486,86 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
             )).scalars().first()
             if not sold:
                 db_open_codes.add(code)
-                break
+                db_open_sids.setdefault(code, []).append(sid)
 
     zombie_codes = db_open_codes - kis_codes
     fixed = []
+
     for code in zombie_codes:
-        await db.execute(
-            Trade.__table__.update()
-            .where(and_(
-                Trade.code == code,
-                Trade.order_type == "SELL",
-                Trade.status == "FAILED",
-            ))
-            .values(status="CLOSED", notes="KIS 실잔고 기준 자동 보정")
-        )
+        for sid in db_open_sids.get(code, []):
+            # 1) SELL FAILED 레코드가 있으면 → CLOSED 보정
+            failed_sell = (await db.execute(
+                select(Trade).where(and_(
+                    Trade.signal_id == sid,
+                    Trade.order_type == "SELL",
+                    Trade.status == "FAILED",
+                ))
+            )).scalars().first()
+
+            if failed_sell:
+                await db.execute(
+                    Trade.__table__.update()
+                    .where(and_(
+                        Trade.signal_id == sid,
+                        Trade.order_type == "SELL",
+                        Trade.status == "FAILED",
+                    ))
+                    .values(status="CLOSED", notes="KIS 실잔고 기준 자동 보정")
+                )
+                logger.warning(f"[SYNC] SELL FAILED → CLOSED 보정: {code} (signal={sid[:8]})")
+
+            else:
+                # 2) SELL 레코드 자체가 없음 → 수동 매도된 것
+                #    KIS 현재가(혹은 직전 평균단가)로 수익 계산 후 SELL CLOSED 삽입
+                buy_trades = (await db.execute(
+                    select(Trade).where(and_(
+                        Trade.signal_id == sid,
+                        Trade.order_type == "BUY",
+                        Trade.status == "FILLED",
+                    ))
+                )).scalars().all()
+
+                if not buy_trades:
+                    continue
+
+                total_qty   = sum(t.quantity for t in buy_trades)
+                total_cost  = sum(t.price * t.quantity for t in buy_trades)
+                avg_buy     = total_cost / total_qty if total_qty else 0
+
+                # KIS 현재가 조회 시도 (장 시간 외 실패 시 매수가 사용)
+                try:
+                    price_data   = await kis.get_current_price(code)
+                    sell_price   = price_data.get("price") or int(avg_buy)
+                except Exception:
+                    sell_price   = int(avg_buy)
+
+                sell_amount  = sell_price * total_qty
+                pnl          = (sell_price - avg_buy) * total_qty
+                profit_pct   = (sell_price / avg_buy - 1) * 100 if avg_buy else 0
+
+                await db.execute(
+                    Trade.__table__.insert().values(
+                        id=str(_uuid.uuid4()),
+                        signal_id=sid,
+                        code=code,
+                        name=buy_trades[0].name,
+                        order_type="SELL",
+                        status="CLOSED",
+                        price=sell_price,
+                        quantity=total_qty,
+                        amount=sell_amount,
+                        real_profit=round(pnl, 0),
+                        filled_at=datetime.utcnow(),
+                        notes=f"수동매도 자동감지 (추정가 {sell_price:,}원 / 수익 {profit_pct:+.2f}%)",
+                    )
+                )
+                logger.warning(
+                    f"[SYNC] 수동매도 감지 → SELL CLOSED 삽입: {code} "
+                    f"{total_qty}주 추정가 {sell_price:,}원 ({profit_pct:+.2f}%)"
+                )
+
         await db.commit()
         fixed.append(code)
-        logger.warning(f"[SYNC] 좀비 포지션 정리: {code}")
 
     untracked = kis_codes - db_open_codes
     if untracked:
@@ -501,7 +579,7 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
     }
 
     if fixed or untracked:
-        msg_lines = ["⚙️ <b>[AI INVEST] KIS-DB 포지션 싱크 완료</b>\n━━━━━━━━━━━━━━━━━━"]
+        msg_lines = ["⚙️ <b>[AI INVEST] KIS-DB 포지션 싱크</b>\n━━━━━━━━━━━━━━━━━━"]
         if fixed:
             msg_lines.append(f"✅ 좀비 정리: {', '.join(fixed)}")
         if untracked:
@@ -510,8 +588,6 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
 
     return result
 
-
-# ── 통합 매수 가능 체크 ───────────────────────────────────────────────────────
 
 async def can_buy(
     db: AsyncSession,
