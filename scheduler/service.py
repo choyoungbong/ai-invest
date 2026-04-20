@@ -560,7 +560,7 @@ def create_scheduler() -> AsyncIOScheduler:
         (3, 5), (3, 35), (4, 5), (4, 35),
     ]:
         scheduler.add_job(
-            job_us_trading_scan,
+            job_us_scan,
             CronTrigger(hour=h, minute=m, day_of_week="mon-sat", timezone=KST),
             id=f"us_scan_{h:02d}{m:02d}",
             name=f"🇺🇸 {h:02d}:{m:02d} 미국 스캔",
@@ -568,7 +568,7 @@ def create_scheduler() -> AsyncIOScheduler:
 
     # 미국장 손절/익절 체크 (5분마다, 22:35~04:50)
     scheduler.add_job(
-        job_us_stop_loss_check,
+        job_us_position_check,
         CronTrigger(
             hour="22-23",
             minute="*/5",
@@ -581,7 +581,7 @@ def create_scheduler() -> AsyncIOScheduler:
         coalesce=True,
     )
     scheduler.add_job(
-        job_us_stop_loss_check,
+        job_us_position_check,
         CronTrigger(
             hour="0-4",
             minute="*/5",
