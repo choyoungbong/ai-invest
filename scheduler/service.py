@@ -551,49 +551,6 @@ def create_scheduler() -> AsyncIOScheduler:
         id="us_market_close",
         name="🇺🇸 미국장 마감",
     )
-
-    # 미국장 30분 신호 스캔
-    # 22:35 ~ 23:35 (당일), 00:05 ~ 04:35 (익일)
-    for h, m in [
-        (22, 35), (23, 5), (23, 35),
-        (0, 5), (0, 35), (1, 5), (1, 35), (2, 5), (2, 35),
-        (3, 5), (3, 35), (4, 5), (4, 35),
-    ]:
-        scheduler.add_job(
-            job_us_scan,
-            CronTrigger(hour=h, minute=m, day_of_week="mon-sat", timezone=KST),
-            id=f"us_scan_{h:02d}{m:02d}",
-            name=f"🇺🇸 {h:02d}:{m:02d} 미국 스캔",
-        )
-
-    # 미국장 손절/익절 체크 (5분마다, 22:35~04:50)
-    scheduler.add_job(
-        job_us_position_check,
-        CronTrigger(
-            hour="22-23",
-            minute="*/5",
-            day_of_week="mon-fri",
-            timezone=KST,
-        ),
-        id="us_stoploss_night",
-        name="🇺🇸 미국 손절/익절 (야간)",
-        max_instances=1,
-        coalesce=True,
-    )
-    scheduler.add_job(
-        job_us_position_check,
-        CronTrigger(
-            hour="0-4",
-            minute="*/5",
-            day_of_week="tue-sat",
-            timezone=KST,
-        ),
-        id="us_stoploss_morning",
-        name="🇺🇸 미국 손절/익절 (새벽)",
-        max_instances=1,
-        coalesce=True,
-    )
-
     return scheduler
 
 

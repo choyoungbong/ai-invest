@@ -39,9 +39,9 @@ BASE_URL = (
 
 # 대상 ETF 거래소 코드
 EXCHANGE_MAP = {
-    "SPLG": "NYSE",
-    "TQQQ": "NASD",
-    "SOXL": "AMEX",
+    "SPLG": "NYS",
+    "TQQQ": "NAS",
+    "SOXL": "AMS",
 }
 
 # 토큰 캐시
@@ -108,7 +108,7 @@ async def get_us_price(symbol: str) -> dict:
          "volume": int, "exchange": str}
     """
     token    = await _get_token()
-    exchange = EXCHANGE_MAP.get(symbol, "NASD")
+    exchange = EXCHANGE_MAP.get(symbol, "NAS")
 
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(
@@ -173,7 +173,7 @@ async def get_us_balance() -> dict:
             params={
                 "CANO":           acc_no,
                 "ACNT_PRDT_CD":   acc_cd,
-                "OVRS_EXCG_CD":   "NASD",
+                "OVRS_EXCG_CD":   "NAS",
                 "TR_CRCY_CD":     "USD",
                 "CTX_AREA_FK200": "",
                 "CTX_AREA_NK200": "",
@@ -221,7 +221,7 @@ async def _order(symbol: str, quantity: int, side: str, price: float = 0) -> dic
 
     token          = await _get_token()
     acc_no, acc_cd = _parse_account(OVERSEAS_ACCOUNT_NO)
-    exchange       = EXCHANGE_MAP.get(symbol, "NASD")
+    exchange       = EXCHANGE_MAP.get(symbol, "NAS")
 
     tr_map = {
         ("BUY",  True):  "VTTT1002U",

@@ -1,54 +1,32 @@
 """
-Capital Allocation – 전략별 자금 배분
+Capital Allocation – 종목당 투자금 배분
 
-각 전략에 총 투자 예산의 비율을 할당합니다.
-신호 발생 시 해당 전략의 배분 비율에 따라 주문 금액이 결정됩니다.
+종목당 최대 투자금(MAX_AMOUNT_PER_STOCK)을 기준으로,
+신뢰도에 따라 비율을 조정합니다.
 
-설정 예시:
-  총 투자 예산:  5,000,000원
-  breakout:     40% → 최대 2,000,000원
-  ma_cross:     30% → 최대 1,500,000원
-  rsi_reversal: 20% → 최대 1,000,000원
-  macd:         10% → 최대   500,000원
+  신뢰도 ≥ 0.7 : MAX_AMOUNT_PER_STOCK × 100%
+  신뢰도 0.4~0.7: MAX_AMOUNT_PER_STOCK × 60%
+  신뢰도 < 0.4  : MAX_AMOUNT_PER_STOCK × 30%
+
+분할매수 적용 시 (SPLIT_BUY_RATIO=0.6):
+  1차 매수 = 위 금액 × 60%
+  2차 매수 = 위 금액 × 40%
 """
 import logging
 import os
 
 logger = logging.getLogger(__name__)
 
-# ── 전체 투자 예산 ─────────────────────────────────────────────────────────────
-TOTAL_BUDGET = int(os.getenv("TOTAL_BUDGET", "5000000"))   # 기본 500만원
-
-# ── 전략별 배분 비율 (합계 = 1.0) ─────────────────────────────────────────────
-ALLOCATION: dict[str, float] = {
-    "breakout":     float(os.getenv("ALLOC_BREAKOUT",     "0.40")),
-    "ma_cross":     float(os.getenv("ALLOC_MA_CROSS",     "0.30")),
-    "rsi_reversal": float(os.getenv("ALLOC_RSI_REVERSAL", "0.20")),
-    "macd":         float(os.getenv("ALLOC_MACD",         "0.10")),
-}
-
-# ── 리스크 파라미터 ────────────────────────────────────────────────────────────
-MAX_SINGLE_TRADE_PCT = float(os.getenv("MAX_SINGLE_TRADE_PCT", "0.20"))  # 전략 예산의 최대 20%
-MIN_ORDER_AMOUNT     = 100_000   # 최소 주문금액 10만원
-
-
-def get_strategy_budget(strategy: str) -> int:
-    """전략에 할당된 예산(원)을 반환합니다."""
-    ratio = ALLOCATION.get(strategy, 0.10)
-    return int(TOTAL_BUDGET * ratio)
+TOTAL_BUDGET         = int(os.getenv("TOTAL_BUDGET",         "3000000"))
+MAX_AMOUNT_PER_STOCK = int(os.getenv("MAX_AMOUNT_PER_STOCK", "1000000"))
+MIN_ORDER_AMOUNT     = 100_000  # 최소 주문금액 10만원
 
 
 def get_order_amount(strategy: str, confidence: float = 0.5) -> int:
     """
-    전략 + 신뢰도 기반 주문 금액을 계산합니다.
-
-    신뢰도가 높을수록 더 많은 금액을 투자합니다.
-    - confidence 0.0~0.4: 전략 예산의 30%
-    - confidence 0.4~0.7: 전략 예산의 60%
-    - confidence 0.7~1.0: 전략 예산의 100% (최대 20%)
+    신뢰도 기반 주문 금액 반환.
+    전략 무관하게 MAX_AMOUNT_PER_STOCK 기준으로 계산.
     """
-    budget = get_strategy_budget(strategy)
-
     if confidence >= 0.7:
         ratio = 1.0
     elif confidence >= 0.4:
@@ -56,32 +34,29 @@ def get_order_amount(strategy: str, confidence: float = 0.5) -> int:
     else:
         ratio = 0.3
 
-    amount = int(budget * ratio * MAX_SINGLE_TRADE_PCT)
+    amount = int(MAX_AMOUNT_PER_STOCK * ratio)
     return max(amount, MIN_ORDER_AMOUNT)
 
 
+def get_strategy_budget(strategy: str) -> int:
+    """하위 호환성 유지용 — MAX_AMOUNT_PER_STOCK 반환"""
+    return MAX_AMOUNT_PER_STOCK
+
+
 def calc_quantity_by_budget(strategy: str, price: float, confidence: float = 0.5) -> int:
-    """전략/신뢰도/현재가를 기반으로 주문 수량을 계산합니다."""
     if price <= 0:
         return 0
     amount = get_order_amount(strategy, confidence)
-    qty    = int(amount // price)
-    return max(qty, 1)
+    return max(int(amount // price), 1)
 
 
 def get_allocation_summary() -> dict:
-    """현재 자금 배분 현황을 반환합니다."""
-    total_ratio = sum(ALLOCATION.values())
     return {
-        "total_budget":    TOTAL_BUDGET,
-        "total_ratio":     round(total_ratio, 2),
-        "is_valid":        abs(total_ratio - 1.0) < 0.01,
-        "strategies": {
-            name: {
-                "ratio":      ratio,
-                "budget":     int(TOTAL_BUDGET * ratio),
-                "max_single": int(TOTAL_BUDGET * ratio * MAX_SINGLE_TRADE_PCT),
-            }
-            for name, ratio in ALLOCATION.items()
+        "total_budget":         TOTAL_BUDGET,
+        "max_amount_per_stock": MAX_AMOUNT_PER_STOCK,
+        "confidence_tiers": {
+            "high (≥0.7)":   MAX_AMOUNT_PER_STOCK,
+            "mid (0.4~0.7)": int(MAX_AMOUNT_PER_STOCK * 0.6),
+            "low (<0.4)":    int(MAX_AMOUNT_PER_STOCK * 0.3),
         },
     }
