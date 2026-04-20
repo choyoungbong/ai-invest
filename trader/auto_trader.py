@@ -212,7 +212,15 @@ async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[di
     buyable, reason = await can_buy(db)
     if not buyable:
         logger.info(f"매수 차단: {reason}")
-        await send_message(f"⛔ <b>[AI INVEST] 매수 차단</b>\n사유: {reason}")
+        # 같은 사유 30분 내 중복 알림 방지
+        import time as _time
+        _now = _time.time()
+        _last = getattr(auto_execute_signals, "_last_block_alert", 0)
+        _last_reason = getattr(auto_execute_signals, "_last_block_reason", "")
+        if _now - _last > 1800 or _last_reason != reason:
+            await send_message(f"⛔ <b>[AI INVEST] 매수 차단</b>\n사유: {reason}")
+            auto_execute_signals._last_block_alert = _now
+            auto_execute_signals._last_block_reason = reason
         return []
 
     executed = []

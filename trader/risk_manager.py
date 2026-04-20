@@ -217,7 +217,7 @@ async def _calc_today_pnl(db: AsyncSession) -> tuple[int, int]:
     sells = (await db.execute(
         select(Trade).where(and_(
             Trade.order_type == "SELL",
-            Trade.status == "FILLED",
+            Trade.status.in_(["FILLED", "CLOSED"]),  # CLOSED=수동매도 포함
             Trade.created_at >= today_start_utc,
         ))
     )).scalars().all()
@@ -644,7 +644,7 @@ async def get_risk_status(db: AsyncSession) -> dict:
     sells = (await db.execute(
         select(Trade).where(and_(
             Trade.order_type == "SELL",
-            Trade.status == "FILLED",
+            Trade.status.in_(["FILLED", "CLOSED"]),  # CLOSED=수동매도 포함
             Trade.created_at >= today_start_utc,
         ))
     )).scalars().all()
