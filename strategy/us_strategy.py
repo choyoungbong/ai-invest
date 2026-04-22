@@ -204,11 +204,13 @@ def _rsi(closes: list[float], period: int = 14) -> float | None:
 async def fetch_ohlcv(symbol: str, bars: int = 30) -> list[dict]:
     """
     yfinance로 미국 ETF 30분봉 조회.
-    설치: pip install yfinance
+    SPLG는 yfinance에서 조회 불가 → SPY로 대체 (동일 지수 추종)
     """
     try:
         import yfinance as yf
-        df = yf.Ticker(symbol).history(period="5d", interval="30m")
+        # SPLG fallback: yfinance에서 데이터 없음 → SPY로 대체
+        yf_symbol = "SPY" if symbol == "SPLG" else symbol
+        df = yf.Ticker(yf_symbol).history(period="5d", interval="30m")
         if df.empty:
             return []
         rows = []
