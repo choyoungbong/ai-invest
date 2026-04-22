@@ -21,6 +21,7 @@ Scheduler – 자동 실행 스케줄러
         → 날짜가 바뀌면 자동 초기화 (다음 날 다시 알림 발송)
         → 실행(매수 시도)은 모든 신호 대상으로 유지 (알림만 중복 억제)
 """
+import os
 import logging
 from datetime import datetime, date
 
