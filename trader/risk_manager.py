@@ -568,22 +568,55 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
         fixed.append(code)
 
     untracked = kis_codes - db_open_codes
+    auto_added = []
     if untracked:
-        logger.error(f"[SYNC] 미추적 포지션 발견: {untracked}")
+        logger.warning(f"[SYNC] 미추적 포지션 발견 — 자동 DB 삽입: {untracked}")
+        for holding in holdings:
+            code = holding["code"]
+            if code not in untracked:
+                continue
+            try:
+                import uuid as _uuid
+                new_signal_id = str(_uuid.uuid4())
+                new_trade_id  = str(_uuid.uuid4())
+                avg_price     = int(holding["avg_price"])
+                quantity      = holding["quantity"]
+                await db.execute(
+                    Trade.__table__.insert().values(
+                        id=new_trade_id,
+                        signal_id=new_signal_id,
+                        code=code,
+                        name=holding["name"],
+                        order_type="BUY",
+                        status="FILLED",
+                        price=avg_price,
+                        quantity=quantity,
+                        amount=avg_price * quantity,
+                        phase=1,
+                        filled_at=datetime.utcnow(),
+                        notes="수동매수 자동감지 — KIS 잔고 기준 DB 삽입",
+                    )
+                )
+                await db.commit()
+                auto_added.append(code)
+                logger.info(f"[SYNC] 수동매수 DB 삽입 완료: {code} {quantity}주 @ {avg_price:,}원")
+            except Exception as e:
+                logger.error(f"[SYNC] 수동매수 DB 삽입 실패 [{code}]: {e}")
 
     result = {
         "kis_holdings": list(kis_codes),
         "db_open":      list(db_open_codes),
         "zombie_fixed": fixed,
         "untracked":    list(untracked),
+        "auto_added":   auto_added,
     }
 
-    if fixed or untracked:
+    if fixed or auto_added:
         msg_lines = ["⚙️ <b>[AI INVEST] KIS-DB 포지션 싱크</b>\n━━━━━━━━━━━━━━━━━━"]
         if fixed:
             msg_lines.append(f"✅ 좀비 정리: {', '.join(fixed)}")
-        if untracked:
-            msg_lines.append(f"⚠️ 미추적 포지션: {', '.join(untracked)} (수동 확인 필요)")
+        if auto_added:
+            msg_lines.append(f"📥 수동매수 자동등록: {', '.join(auto_added)}")
         await send_message("\n".join(msg_lines))
 
     return result

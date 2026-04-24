@@ -349,6 +349,21 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
         profit_ratio    = current_price / avg_price - 1
         profit_pct_val  = profit_ratio * 100
 
+        # ── 0순위: 상한가 자동 익절 (+29% 이상) ────────────────────────────
+        if profit_ratio >= 0.29:
+            logger.info(
+                f"상한가 익절: {code} 현재가 {current_price:,} "
+                f"({profit_pct_val:.2f}%) — 상한가 도달 자동 청산"
+            )
+            result = await _execute_sell(
+                db, position, current_price,
+                f"🚀 상한가 자동 익절 ({profit_pct_val:.2f}%) — "
+                f"상한가 도달 전량 청산"
+            )
+            if result:
+                executed.append(result)
+            continue
+
         # ── 1순위: 하드 손절 ─────────────────────────────────────────────────
         if current_price <= hard_stop_price:
             logger.warning(
