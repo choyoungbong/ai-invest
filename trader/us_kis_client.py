@@ -23,8 +23,9 @@ logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
 
 # ── 환경변수 ──────────────────────────────────────────────────────────────────
-APP_KEY    = os.getenv("KIS_APP_KEY",    "")
-APP_SECRET = os.getenv("KIS_APP_SECRET", "")
+# 해외 전용 키 (KIS_OVERSEAS_APP_KEY 없으면 국내 키 fallback)
+APP_KEY    = os.getenv("KIS_OVERSEAS_APP_KEY") or os.getenv("KIS_APP_KEY",    "")
+APP_SECRET = os.getenv("KIS_OVERSEAS_APP_SECRET") or os.getenv("KIS_APP_SECRET", "")
 IS_MOCK    = os.getenv("KIS_MOCK", "false").lower() == "true"
 
 # 해외 전용 계좌번호 (국내와 별도)
@@ -66,16 +67,6 @@ async def _get_token() -> str:
         now = datetime.utcnow()
         if _token and _token_expires and now < _token_expires - timedelta(minutes=10):
             return _token
-
-        # 국내 토큰 재사용 (동일 APP_KEY 사용)
-        try:
-            from trader.kis_client import _access_token, _token_expires_at
-            if _access_token and _token_expires_at and datetime.utcnow() < _token_expires_at - timedelta(minutes=10):
-                _token         = _access_token
-                _token_expires = _token_expires_at
-                return _token
-        except Exception:
-            pass
 
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
@@ -182,7 +173,12 @@ async def get_us_balance() -> dict:
         data = resp.json()
 
     out1 = data.get("output1", [])
-    out2 = data.get("output2", {})
+    out2_raw = data.get("output2", {})
+    # output2가 리스트인 경우 처리
+    if isinstance(out2_raw, list):
+        out2 = out2_raw[0] if out2_raw else {}
+    else:
+        out2 = out2_raw
 
     holdings = []
     for item in out1:
@@ -199,8 +195,39 @@ async def get_us_balance() -> dict:
             "exchange":      item.get("ovrs_excg_cd", ""),
         })
 
-    cash_usd  = float(out2.get("frcr_dncl_amt_2", 0) or 0)
-    total_usd = float(out2.get("tot_asst_amt", 0) or 0)
+    # 외화 예수금 별도 조회 (CTRP6504R)
+    cash_usd = 0.0
+    try:
+        async with httpx.AsyncClient(timeout=15) as client2:
+            resp2 = await client2.get(
+                f"{BASE_URL}/uapi/overseas-stock/v1/trading/inquire-present-balance",
+                headers={
+                    "authorization": f"Bearer {token}",
+                    "appkey":        APP_KEY,
+                    "appsecret":     APP_SECRET,
+                    "tr_id":         "CTRP6504R",
+                },
+                params={
+                    "CANO":             acc_no,
+                    "ACNT_PRDT_CD":     acc_cd,
+                    "WCRC_FRCR_DVSN_CD": "02",
+                    "NATN_CD":          "840",
+                    "TR_MKET_CD":       "NY",
+                    "INQR_DVSN_CD":     "00",
+                },
+            )
+            data2 = resp2.json()
+            out2b = data2.get("output2", [])
+            if isinstance(out2b, list) and out2b:
+                for item in out2b:
+                    if item.get("crcy_cd") == "USD":
+                        cash_usd = float(item.get("frcr_dncl_amt_2", 0) or 0)
+                        break
+    except Exception as e:
+        logger.warning(f"[US_KIS] 외화 예수금 조회 실패: {e}")
+    total_usd = cash_usd + sum(
+        float(h["current_price"]) * h["quantity"] for h in holdings
+    )
 
     logger.info(
         f"[US_KIS] 잔고 — 예수금 ${cash_usd:.2f} / "
