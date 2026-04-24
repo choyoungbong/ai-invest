@@ -27,7 +27,7 @@ async def calc_pnl(db: AsyncSession, start: datetime, end: datetime) -> dict:
         select(Trade)
         .where(and_(
             Trade.order_type == "SELL",
-            Trade.status == "FILLED",
+            Trade.status.in_(["FILLED", "CLOSED"]),  # CLOSED=수동매도 포함
             Trade.created_at >= start,
             Trade.created_at <= end,
         ))
