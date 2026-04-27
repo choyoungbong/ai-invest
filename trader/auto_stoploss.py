@@ -50,6 +50,13 @@ logger = logging.getLogger(__name__)
 STOP_LOSS_PCT     = float(os.getenv("STOP_LOSS_PCT",      "-0.015"))
 HARD_STOP_PCT     = float(os.getenv("HARD_STOP_PCT",      "-0.025"))
 TARGET_PROFIT_PCT = float(os.getenv("TARGET_PROFIT_PCT",   "0.05"))
+
+# ── 손절 보호 설정 ────────────────────────────────────────────────────────────
+STOP_LOSS_SKIP_MINUTES  = int(os.getenv("STOP_LOSS_SKIP_MINUTES", "30"))  # 장 초반 손절 유예 (분)
+STOP_LOSS_CONFIRM_COUNT = int(os.getenv("STOP_LOSS_CONFIRM_COUNT", "2"))  # 연속 확인 횟수
+
+# 연속 손절 확인 카운터 (인메모리)
+_stop_loss_counter: dict[str, int] = {}  # signal_id → 연속 손절 확인 횟수
 BLACKLIST_DAYS    = int(os.getenv("BLACKLIST_DAYS",         "3"))
 
 # ── 트레일링 스탑 파라미터 ─────────────────────────────────────────────────────
@@ -349,6 +356,14 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
         profit_ratio    = current_price / avg_price - 1
         profit_pct_val  = profit_ratio * 100
 
+        # ── 장 초반 손절 유예 (A) ────────────────────────────────────────────
+        import pytz as _pytz
+        _kst = _pytz.timezone("Asia/Seoul")
+        _now_kst = datetime.now(_kst)
+        _market_open = _now_kst.replace(hour=9, minute=5, second=0, microsecond=0)
+        _elapsed_min = (_now_kst - _market_open).total_seconds() / 60
+        _in_early_session = 0 <= _elapsed_min < STOP_LOSS_SKIP_MINUTES
+
         # ── 0순위: 상한가 자동 익절 (+29% 이상) ────────────────────────────
         if profit_ratio >= 0.29:
             logger.info(
@@ -364,7 +379,7 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
                 executed.append(result)
             continue
 
-        # ── 1순위: 하드 손절 ─────────────────────────────────────────────────
+        # ── 1순위: 하드 손절 (장 초반 유예 없음 — 하드는 항상 적용) ──────────
         if current_price <= hard_stop_price:
             logger.warning(
                 f"하드 손절: {code} 현재가 {current_price:,} ≤ {hard_stop_price:,.0f} "
@@ -377,21 +392,39 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
             )
             if result:
                 executed.append(result)
+            _stop_loss_counter.pop(signal_id, None)
             continue
 
-        # ── 2순위: 일반 손절 ─────────────────────────────────────────────────
+        # ── 2순위: 일반 손절 (A: 장 초반 유예 / C: 연속 확인) ──────────────
         if current_price <= stop_loss_price:
+            # A: 장 초반 30분 이내 → 연속 확인 횟수 2배 필요
+            confirm_needed = STOP_LOSS_CONFIRM_COUNT * 2 if _in_early_session else STOP_LOSS_CONFIRM_COUNT
+            _stop_loss_counter[signal_id] = _stop_loss_counter.get(signal_id, 0) + 1
+            cnt = _stop_loss_counter[signal_id]
+
+            if cnt < confirm_needed:
+                logger.info(
+                    f"손절 대기 [{code}] {cnt}/{confirm_needed}회 확인 중 "
+                    f"현재가 {current_price:,} ({profit_pct_val:.2f}%) "
+                    f"{'[장 초반 유예 중]' if _in_early_session else ''}"
+                )
+                continue
+
             logger.warning(
                 f"손절: {code} 현재가 {current_price:,} ≤ {stop_loss_price:,.0f} "
-                f"({profit_pct_val:.2f}%)"
+                f"({profit_pct_val:.2f}%) [{cnt}회 확인 완료]"
             )
             result = await _execute_sell(
                 db, position, current_price,
-                f"손절 ({profit_pct_val:.2f}%) — 손절가 {stop_loss_price:,.0f}원 도달"
+                f"손절 ({profit_pct_val:.2f}%) — {cnt}회 확인 후 청산"
             )
             if result:
                 executed.append(result)
+            _stop_loss_counter.pop(signal_id, None)
             continue
+        else:
+            # 손절선 이탈 아님 → 카운터 리셋
+            _stop_loss_counter.pop(signal_id, None)
 
         # ── 3·4순위: 트레일링 스탑 / 고정 익절 ──────────────────────────────
         if TRAILING_STOP_ENABLED:

@@ -119,6 +119,7 @@ class Trade(Base):
     # 상태
     status           = Column(String(20), default="PENDING")
     broker_order_id  = Column(String(100))
+    notes            = Column(String(500))
     is_simulation    = Column(Boolean, default=True)
     created_at       = Column(DateTime, server_default=func.now())
     filled_at        = Column(DateTime)

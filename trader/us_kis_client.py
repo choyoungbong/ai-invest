@@ -40,9 +40,12 @@ BASE_URL = (
 
 # 대상 ETF 거래소 코드
 EXCHANGE_MAP = {
-    "SPLG": "NYS",
-    "TQQQ": "NAS",
-    "SOXL": "AMS",
+    # 나스닥 개별주 (모두 NAS)
+    "MARA": "NAS", "JOBY": "NAS", "GRAB": "NAS", "OPEN": "NAS",
+    "CLOV": "NAS", "SOFI": "NAS", "RIVN": "NAS", "DKNG": "NAS",
+    "CHWY": "NAS", "SNAP": "NAS", "LCID": "NAS", "PLUG": "NAS",
+    # 기존 ETF (하위 호환)
+    "SPLG": "NYS", "TQQQ": "NAS", "SOXL": "AMS",
 }
 
 # 토큰 캐시
