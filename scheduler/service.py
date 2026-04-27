@@ -464,13 +464,13 @@ def create_scheduler() -> AsyncIOScheduler:
         coalesce=True,
     )
 
-    # ── 15:10 조건부 청산 ────────────────────────────────────────────────────
-    scheduler.add_job(
-        job_conditional_sell_eod,
-        CronTrigger(hour=15, minute=10, day_of_week="mon-fri", timezone=KST),
-        id="conditional_sell_eod",
-        name="15:10 조건부 청산",
-    )
+    # ── 15:10 조건부 청산 (수동매도 전략으로 비활성화) ──────────────────────
+    # scheduler.add_job(
+    #     job_conditional_sell_eod,
+    #     CronTrigger(hour=15, minute=10, day_of_week="mon-fri", timezone=KST),
+    #     id="conditional_sell_eod",
+    #     name="15:10 조건부 청산",
+    # )
 
     # ── 15:15 당일 전체 강제 청산 (현재 비활성 — 필요 시 주석 해제) ──────────
     # scheduler.add_job(
