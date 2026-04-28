@@ -356,16 +356,11 @@ async def filter_signals(db: AsyncSession, signals: list[dict]) -> list[dict]:
     now_kst  = datetime.now(KST)
     now_hour, now_min = now_kst.hour, now_kst.minute
 
-    if now_hour > AFTERNOON_BLOCK_HOUR or (
-        now_hour == AFTERNOON_BLOCK_HOUR and now_min >= AFTERNOON_BLOCK_MINUTE
-    ):
-        logger.info(f"[오후차단] {now_kst.strftime('%H:%M')} — {len(signals)}건 전면 차단")
-        await send_message(
-            f"🕒 <b>[AI INVEST] 오후 진입 차단</b>\n"
-            f"시각: {now_kst.strftime('%H:%M')} KST (14:30 이후)\n"
-            f"신호 {len(signals)}건 무효화 — 익일 갭다운 리스크 방지"
-        )
-        return []
+    # 14:30 전면 차단 제거 — 수동매도 전략으로 익일 갭다운 본인 판단
+    # if now_hour > AFTERNOON_BLOCK_HOUR or (
+    #     now_hour == AFTERNOON_BLOCK_HOUR and now_min >= AFTERNOON_BLOCK_MINUTE
+    # ):
+    #     return []
 
     if now_hour >= AFTERNOON_STRICT_HOUR:
         before  = len(signals)

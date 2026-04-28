@@ -41,6 +41,8 @@ from trader.auto_trader import auto_execute_signals, check_and_execute_phase2
 from report.service import send_daily_report
 from trader.risk_manager import sync_positions_with_kis
 
+MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))
+
 logger = logging.getLogger(__name__)
 KST = pytz.timezone("Asia/Seoul")
 
@@ -116,7 +118,19 @@ async def _run_strategy_and_trade(db, now_str: str) -> tuple[list, list]:
 
     seen_codes  = {s["code"] for s in main_signals}
     ext_unique  = [s for s in ext_signals if s["code"] not in seen_codes]
-    all_signals = main_signals + ext_unique
+
+    # ── MAX_POSITIONS 초과 방지 ───────────────────────────────────────────────
+    from trader.risk_manager import check_max_positions
+    pos_hit, current_cnt = await check_max_positions(db)
+    available_slots = max(0, MAX_POSITIONS - current_cnt)
+
+    # 신뢰도 높은 순으로 정렬 후 슬롯 수만큼만 허용
+    all_candidates = main_signals + ext_unique
+    all_candidates.sort(key=lambda s: s.get("confidence", 0), reverse=True)
+    all_signals = all_candidates[:available_slots] if available_slots < len(all_candidates) else all_candidates
+
+    if len(all_candidates) > available_slots:
+        logger.info(f"[슬롯 제한] 신호 {len(all_candidates)}건 → {available_slots}건 (슬롯 {current_cnt}/{MAX_POSITIONS})")
 
     if all_signals:
         await analyze_all_new_signals(db)
