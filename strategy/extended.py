@@ -292,19 +292,24 @@ async def run_extended_strategy(
             except Exception as e:
                 logger.warning(f"[{code}] 실시간 가격 조회 실패, DB 가격 사용: {e}")
 
-            # 오늘 이미 같은 종목+전략 신호가 있으면 건너뜀
-            from trader.risk_manager import _kst_today_start_utc
-            today_start = _kst_today_start_utc()
-            existing = (await db.execute(
-                select(Signal).where(and_(
-                    Signal.code == code,
-                    Signal.strategy == strat_name,
-                    Signal.created_at >= today_start,
-                ))
+            # 현재 보유 중인 종목만 건너뜀 (매도 후 재진입 허용)
+            from api.models import Trade as TradeModel
+            open_pos = (await db.execute(
+                select(TradeModel).where(and_(
+                    TradeModel.code == code,
+                    TradeModel.order_type == "BUY",
+                    TradeModel.status == "FILLED",
+                )).where(
+                    ~select(TradeModel.id).where(and_(
+                        TradeModel.code == code,
+                        TradeModel.order_type == "SELL",
+                        TradeModel.status.in_(["FILLED", "CLOSED"]),
+                    )).correlate(False).exists()
+                )
             )).scalars().first()
-            
-            if existing:
-                logger.debug(f"[{code}] 오늘 이미 {strat_name} 신호 존재 — 건너뜀")
+
+            if open_pos:
+                logger.debug(f"[{code}] 현재 보유 중 — 신호 건너뜀")
                 continue
             
             signal_id = str(uuid.uuid4())

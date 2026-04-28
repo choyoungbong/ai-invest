@@ -411,23 +411,20 @@ async def run_strategy(
     """스캐너 후보 종목에 강화된 돌파 전략을 적용합니다."""
     signals = []
 
-    from trader.risk_manager import _kst_today_start_utc
-    today_start_utc = _kst_today_start_utc()
-    already_today = set(
-        (await db.execute(
-            select(Signal.code).where(and_(
-                Signal.strategy == "breakout",
-                Signal.created_at >= today_start_utc,
-            ))
-        )).scalars().all()
-    )
-
     for item in candidates:
         code = item["code"]
         name = item.get("name", code)
-
-        if code in already_today:
-            logger.debug(f"[{code}] 오늘 breakout 신호 중복 — 건너뜀")
+        # 현재 보유 중인 종목만 건너뜀 (매도 후 재진입 허용)
+        from api.models import Trade as TradeModel
+        open_pos = (await db.execute(
+            select(TradeModel).where(and_(
+                TradeModel.code == code,
+                TradeModel.order_type == "BUY",
+                TradeModel.status == "FILLED",
+            ))
+        )).scalars().first()
+        if open_pos:
+            logger.debug(f"[{code}] 현재 보유 중 — breakout 신호 건너뜀")
             continue
 
         try:
