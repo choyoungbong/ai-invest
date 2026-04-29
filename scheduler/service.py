@@ -428,7 +428,7 @@ def create_scheduler() -> AsyncIOScheduler:
         )
 
     # ── 빠른 스캔: 하루 6회 (수집 없이 전략 + 매수) ─────────────────────────
-    for hour, minute in [(9, 30), (10, 30), (11, 30), (12, 30), (13, 30), (14, 30), (15, 0)]:
+    for hour, minute in [(9,20),(9,40),(10,20),(10,40),(11,20),(11,40),(12,20),(12,40),(13,20),(13,40),(14,20),(14,40),(15,0)]:
         scheduler.add_job(
             job_scan_only,
             CronTrigger(hour=hour, minute=minute, day_of_week="mon-fri", timezone=KST),
@@ -447,12 +447,12 @@ def create_scheduler() -> AsyncIOScheduler:
         CronTrigger(hour=15, minute=25, timezone=KST),
         id="sync_positions_close", name="포지션 싱크 (장 종료)",
     )
-    # ── 포지션 싱크: 장 중 30분마다 ────────────────────────────────────────
+    # ── 포지션 싱크: 장 중 15분마다 ────────────────────────────────────────
     scheduler.add_job(
         job_sync_positions,
-        CronTrigger(hour="9-15", minute="*/30", day_of_week="mon-fri", timezone=KST),
+        CronTrigger(hour="9-15", minute="*/15", day_of_week="mon-fri", timezone=KST),
         id="sync_positions_intraday",
-        name="포지션 싱크 (장 중 30분)",
+        name="포지션 싱크 (장 중 15분)",
         max_instances=1,
         coalesce=True,
     )
