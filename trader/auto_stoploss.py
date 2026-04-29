@@ -364,8 +364,8 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
         _elapsed_min = (_now_kst - _market_open).total_seconds() / 60
         _in_early_session = 0 <= _elapsed_min < STOP_LOSS_SKIP_MINUTES
 
-        # ── 0순위: 상한가 자동 익절 (+29% 이상) ────────────────────────────
-        if profit_ratio >= 0.29:
+        # ── 0순위: 상한가 자동 익절 (수동매도 전략으로 비활성화) ────────────
+        if False and profit_ratio >= 0.29:
             logger.info(
                 f"상한가 익절: {code} 현재가 {current_price:,} "
                 f"({profit_pct_val:.2f}%) — 상한가 도달 자동 청산"
