@@ -428,7 +428,7 @@ def create_scheduler() -> AsyncIOScheduler:
         )
 
     # ── 빠른 스캔: 하루 6회 (수집 없이 전략 + 매수) ─────────────────────────
-    for hour, minute in [(9, 30), (10, 30), (11, 30), (12, 30), (13, 30), (14, 30)]:
+    for hour, minute in [(9, 30), (10, 30), (11, 30), (12, 30), (13, 30), (14, 30), (15, 0)]:
         scheduler.add_job(
             job_scan_only,
             CronTrigger(hour=hour, minute=minute, day_of_week="mon-fri", timezone=KST),
