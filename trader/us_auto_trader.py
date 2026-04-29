@@ -279,6 +279,9 @@ async def run_us_trading(db: AsyncSession) -> list[dict]:
     return executed
 
 
+# ── 미국 트레일링 스탑 고점 추적 (인메모리) ─────────────────────────────────────
+_us_trailing_high: dict[str, float] = {}
+
 # ── 손절/익절 체크 ────────────────────────────────────────────────────────────
 
 async def check_us_positions(db: AsyncSession) -> list[dict]:
@@ -327,7 +330,21 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
 
         pnl_pct = (current_price / trade.price - 1)
 
-        should_sell = pnl_pct >= cfg["target_profit"] or pnl_pct <= cfg["stop_loss"]
+        # ── 미국 트레일링 스탑 (+5% 이상 수익 시 고점 대비 -3% 이탈하면 청산)
+        signal_id = trade.signal_id
+        sell_reason = "익절" if pnl_pct > 0 else "손절"
+        if pnl_pct >= 0.05:
+            prev_high = _us_trailing_high.get(signal_id, current_price)
+            _us_trailing_high[signal_id] = max(prev_high, current_price)
+            trail_stop = _us_trailing_high[signal_id] * 0.97
+            if current_price <= trail_stop:
+                should_sell = True
+                sell_reason = f"트레일링 스탑 ({pnl_pct*100:+.2f}%)"
+                logger.info(f"[US] {trade.code} 트레일링 스탑: ${current_price:.2f} ({pnl_pct*100:+.2f}%)")
+            else:
+                should_sell = pnl_pct >= cfg["target_profit"] or pnl_pct <= cfg["stop_loss"]
+        else:
+            should_sell = pnl_pct >= cfg["target_profit"] or pnl_pct <= cfg["stop_loss"]
         if not should_sell:
             logger.debug(
                 f"[US] {trade.code} 보유: ${trade.price:.2f}→${current_price:.2f} "
