@@ -248,9 +248,17 @@ async def run_us_trading(db: AsyncSession) -> list[dict]:
     if not is_us_market_open():
         return []
 
+    US_MAX_POSITIONS = int(os.getenv("US_MAX_POSITIONS", "4"))
+    open_count = 0
+    for sym in US_ETF_CONFIG.keys():
+        if await _has_open_position(db, sym):
+            open_count += 1
     executed = []
 
     for symbol in US_ETF_CONFIG.keys():
+        if open_count >= US_MAX_POSITIONS:
+            logger.info(f"[US] 최대 포지션 {US_MAX_POSITIONS}개 도달 — 추가 매수 중단")
+            break
         if await _has_open_position(db, symbol):
             logger.debug(f"[US] {symbol} 보유 중 — 건너뜀")
             continue

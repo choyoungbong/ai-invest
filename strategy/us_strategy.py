@@ -31,18 +31,20 @@ KST = pytz.timezone("Asia/Seoul")
 
 # ── 나스닥 종목 설정 ─────────────────────────────────────────────────────────
 US_ETF_CONFIG: dict[str, dict] = {
-    "MARA": {"name": "Marathon Digital Holdings", "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4}   # 최대 4종목 동시 보유 기준,
-    "JOBY": {"name": "Joby Aviation",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4}   # 최대 4종목 동시 보유 기준,
-    "GRAB": {"name": "Grab Holdings",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4}   # 최대 4종목 동시 보유 기준,
-    "OPEN": {"name": "Opendoor Technologies",     "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4}   # 최대 4종목 동시 보유 기준,
-    "CLOV": {"name": "Clover Health",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4}   # 최대 4종목 동시 보유 기준,
-    "SOFI": {"name": "SoFi Technologies",         "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4}   # 최대 4종목 동시 보유 기준,
-    "RIVN": {"name": "Rivian Automotive",         "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4}   # 최대 4종목 동시 보유 기준,
-    "DKNG": {"name": "DraftKings",                "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4}   # 최대 4종목 동시 보유 기준,
-    "CHWY": {"name": "Chewy",                     "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4}   # 최대 4종목 동시 보유 기준,
-    "SNAP": {"name": "Snap",                      "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4}   # 최대 4종목 동시 보유 기준,
-    "LCID": {"name": "Lucid Group",               "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4}   # 최대 4종목 동시 보유 기준,
-    "PLUG": {"name": "Plug Power",                "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4}   # 최대 4종목 동시 보유 기준,
+    "MARA": {"name": "Marathon Digital Holdings", "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
+    "JOBY": {"name": "Joby Aviation",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
+    "GRAB": {"name": "Grab Holdings",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
+    "OPEN": {"name": "Opendoor Technologies",     "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
+    "CLOV": {"name": "Clover Health",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
+    "SOFI": {"name": "SoFi Technologies",         "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
+    "RIVN": {"name": "Rivian Automotive",         "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
+    "DKNG": {"name": "DraftKings",                "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
+    "CHWY": {"name": "Chewy",                     "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
+    "SNAP": {"name": "Snap",                      "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
+    "LCID": {"name": "Lucid Group",               "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
+    "PLUG": {"name": "Plug Power",                "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
+    "TLRY": {"name": "Tilray Brands",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
+    "VALE": {"name": "Vale S.A.",                 "exchange": "NYS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
 }
 
 # ── 전역 파라미터 ─────────────────────────────────────────────────────────────
@@ -133,8 +135,7 @@ def can_trade(symbol: str) -> tuple[bool, str]:
     if not is_us_market_open():
         return False, "미국 장 외 시간"
 
-    if not is_liquidation_done():
-        return False, "비대상 종목 청산 미완료"
+    # 청산 체크 제거 — 기존 보유 종목 없음
 
     if _state["daily_blocked"]:
         return False, f"일일 손실 한도 초과 (${_state['realized_pnl_usd']:.2f})"
@@ -288,12 +289,12 @@ async def generate_signal(symbol: str) -> Optional[dict]:
     vol_mult = volumes[-1] / avg_vol if avg_vol > 0 else 0
 
     cond_trend  = ema5 > ema20
-    cond_rsi    = rsi is not None and 35 <= rsi <= 75  # 완화
+    cond_rsi    = rsi is not None and 20 <= rsi <= 85  # 최대 완화
     cond_vol    = vol_mult >= US_MIN_VOL_MULT
-    cond_price  = current_price >= ema20 * 0.99  # 완화
+    cond_price  = current_price >= ema20 * 0.97  # 최대 완화
 
     cond_count = sum([cond_trend, cond_rsi, cond_vol, cond_price])
-    if cond_count < 3:  # 4개 중 3개 이상 충족
+    if cond_count < 2:  # 4개 중 2개 이상 충족 (최대 완화)
         logger.debug(
             f"[US 전략] {symbol} 신호 없음 | "
             f"추세:{'✅' if cond_trend else '❌'} "

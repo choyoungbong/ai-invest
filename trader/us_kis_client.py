@@ -41,10 +41,11 @@ BASE_URL = (
 # 대상 ETF 거래소 코드
 EXCHANGE_MAP = {
     # 나스닥 개별주 (모두 NAS)
-    "MARA": "NAS", "JOBY": "NAS", "GRAB": "NAS", "OPEN": "NAS",
+    "MARA": "NAS", "JOBY": "NYS", "GRAB": "NAS", "OPEN": "NAS",
     "CLOV": "NAS", "SOFI": "NAS", "RIVN": "NAS", "DKNG": "NAS",
-    "CHWY": "NAS", "SNAP": "NAS", "LCID": "NAS", "PLUG": "NAS",
+    "CHWY": "NYS", "SNAP": "NYS", "LCID": "NAS", "PLUG": "NAS",
     # 기존 ETF (하위 호환)
+    "TLRY": "NAS", "VALE": "NYS",
     "SPLG": "NYS", "TQQQ": "NAS", "SOXL": "AMS",
 }
 
@@ -276,7 +277,7 @@ async def _order(symbol: str, quantity: int, side: str, price: float = 0) -> dic
                 "ACNT_PRDT_CD":     acc_cd,
                 "OVRS_EXCG_CD":     exchange,
                 "PDNO":             symbol,
-                "ORD_DVSN":         "00",
+                "ORD_DVSN":         "00" if price > 0 else "32",  # 00=지정가, 32=시장가
                 "ORD_QTY":          str(quantity),
                 "OVRS_ORD_UNPR":    f"{price:.2f}" if price > 0 else "0",
                 "ORD_SVR_DVSN_CD":  "0",
