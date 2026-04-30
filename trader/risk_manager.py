@@ -488,7 +488,9 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
                 db_open_codes.add(code)
                 db_open_sids.setdefault(code, []).append(sid)
 
-    zombie_codes = db_open_codes - kis_codes
+    # 미국 주식 코드(영문)는 국내 싱크에서 제외
+    us_codes = {c for c in db_open_codes if not c.isdigit()}
+    zombie_codes = (db_open_codes - kis_codes) - us_codes
     fixed = []
 
     for code in zombie_codes:

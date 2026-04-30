@@ -31,20 +31,20 @@ KST = pytz.timezone("Asia/Seoul")
 
 # ── 나스닥 종목 설정 ─────────────────────────────────────────────────────────
 US_ETF_CONFIG: dict[str, dict] = {
-    "MARA": {"name": "Marathon Digital Holdings", "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
-    "JOBY": {"name": "Joby Aviation",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
-    "GRAB": {"name": "Grab Holdings",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
-    "OPEN": {"name": "Opendoor Technologies",     "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
-    "CLOV": {"name": "Clover Health",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
-    "SOFI": {"name": "SoFi Technologies",         "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
-    "RIVN": {"name": "Rivian Automotive",         "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
-    "DKNG": {"name": "DraftKings",                "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
-    "CHWY": {"name": "Chewy",                     "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
-    "SNAP": {"name": "Snap",                      "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
-    "LCID": {"name": "Lucid Group",               "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
-    "PLUG": {"name": "Plug Power",                "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
-    "TLRY": {"name": "Tilray Brands",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
-    "VALE": {"name": "Vale S.A.",                 "exchange": "NYS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/4},
+    "MARA": {"name": "Marathon Digital Holdings", "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
+    "JOBY": {"name": "Joby Aviation",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
+    "GRAB": {"name": "Grab Holdings",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
+    "OPEN": {"name": "Opendoor Technologies",     "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
+    "CLOV": {"name": "Clover Health",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
+    "SOFI": {"name": "SoFi Technologies",         "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
+    "RIVN": {"name": "Rivian Automotive",         "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
+    "DKNG": {"name": "DraftKings",                "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
+    "CHWY": {"name": "Chewy",                     "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
+    "SNAP": {"name": "Snap",                      "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
+    "LCID": {"name": "Lucid Group",               "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
+    "PLUG": {"name": "Plug Power",                "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
+    "TLRY": {"name": "Tilray Brands",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
+    "VALE": {"name": "Vale S.A.",                 "exchange": "NYS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
 }
 
 # ── 전역 파라미터 ─────────────────────────────────────────────────────────────

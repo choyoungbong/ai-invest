@@ -39,12 +39,19 @@ BASE_URL = (
 )
 
 # 대상 ETF 거래소 코드
+# 주문용 거래소 코드 (KIS 주문 API) — NYSE or NASD
 EXCHANGE_MAP = {
-    # 나스닥 개별주 (모두 NAS)
+    "MARA": "NYSE", "JOBY": "NYSE", "GRAB": "NASD", "OPEN": "NASD",
+    "CLOV": "NASD", "SOFI": "NYSE", "RIVN": "NASD", "DKNG": "NASD",
+    "CHWY": "NYSE", "SNAP": "NYSE", "LCID": "NASD", "PLUG": "NASD",
+    "TLRY": "NYSE", "VALE": "NYSE",
+    "SPLG": "NYSE", "TQQQ": "NASD", "SOXL": "NYSE",
+}
+# 시세 조회용 거래소 코드 (KIS 시세 API) — 종목별 상이
+EXCHANGE_MAP_QUOTE = {
     "MARA": "NAS", "JOBY": "NYS", "GRAB": "NAS", "OPEN": "NAS",
     "CLOV": "NAS", "SOFI": "NAS", "RIVN": "NAS", "DKNG": "NAS",
     "CHWY": "NYS", "SNAP": "NYS", "LCID": "NAS", "PLUG": "NAS",
-    # 기존 ETF (하위 호환)
     "TLRY": "NAS", "VALE": "NYS",
     "SPLG": "NYS", "TQQQ": "NAS", "SOXL": "AMS",
 }
@@ -103,7 +110,7 @@ async def get_us_price(symbol: str) -> dict:
          "volume": int, "exchange": str}
     """
     token    = await _get_token()
-    exchange = EXCHANGE_MAP.get(symbol, "NAS")
+    exchange = EXCHANGE_MAP_QUOTE.get(symbol, "NYS")
 
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(
@@ -168,7 +175,7 @@ async def get_us_balance() -> dict:
             params={
                 "CANO":           acc_no,
                 "ACNT_PRDT_CD":   acc_cd,
-                "OVRS_EXCG_CD":   "NAS",
+                "OVRS_EXCG_CD":   "NASD",
                 "TR_CRCY_CD":     "USD",
                 "CTX_AREA_FK200": "",
                 "CTX_AREA_NK200": "",
@@ -186,7 +193,7 @@ async def get_us_balance() -> dict:
 
     holdings = []
     for item in out1:
-        qty = int(item.get("cblc_qty", 0) or 0)
+        qty = int(item.get("ovrs_cblc_qty", 0) or 0)
         if qty <= 0:
             continue
         holdings.append({

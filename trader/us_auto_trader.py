@@ -102,10 +102,11 @@ async def _execute_buy(db: AsyncSession, signal: dict) -> dict:
     if quantity <= 0:
         return {}
 
+    price  = signal["price"]
     result = {}
     for attempt in range(1, 3):
         try:
-            result = await us_buy_order(symbol, quantity)
+            result = await us_buy_order(symbol, quantity, price)
             if result.get("success"):
                 break
             logger.warning(f"[US] {symbol} 매수 재시도 {attempt}: {result.get('message')}")
@@ -122,7 +123,6 @@ async def _execute_buy(db: AsyncSession, signal: dict) -> dict:
 
     signal_id = str(uuid.uuid4())
     trade_id  = str(uuid.uuid4())
-    price     = signal["price"]
 
     await db.execute(
         Trade.__table__.insert().values(
@@ -359,7 +359,7 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
         result = {}
         for attempt in range(1, 3):
             try:
-                result = await us_sell_order(trade.code, trade.quantity)
+                result = await us_sell_order(trade.code, trade.quantity, current_price)
                 if result.get("success"):
                     break
                 logger.warning(f"[US] {trade.code} 매도 재시도 {attempt}")

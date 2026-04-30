@@ -298,6 +298,8 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
         if row.signal_id in sold_sids:
             continue
         position = await _get_open_position(db, row.signal_id)
+        if not row.code.isdigit():  # 미국 주식 제외
+            continue
         if not position:
             continue
         try:
@@ -340,6 +342,9 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
             continue
 
         code      = position["code"]
+        # 미국 주식(영문 코드) 국내 손절 체크에서 제외
+        if not code.isdigit():
+            continue
         name      = position["name"]
         avg_price = position["avg_buy_price"]
 
