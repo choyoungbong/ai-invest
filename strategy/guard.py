@@ -176,6 +176,9 @@ async def check_and_close_expired_positions(db: AsyncSession) -> list[dict]:
 
     closed = []
     for trade in old_trades:
+        # 미국 주식(영문 코드)은 국내 KIS API로 매도 불가 → 제외
+        if not trade.code.isdigit():
+            continue
         sold = (await db.execute(
             select(Trade).where(and_(
                 Trade.code == trade.code,
@@ -366,8 +369,7 @@ async def filter_signals(db: AsyncSession, signals: list[dict]) -> list[dict]:
         before  = len(signals)
         signals = [
             s for s in signals
-            if (s.get("confidence", 0) >= AFTERNOON_MIN_CONFIDENCE
-                and s.get("change_rate", 0) >= AFTERNOON_MIN_CHANGE)
+            if s.get("confidence", 0) >= AFTERNOON_MIN_CONFIDENCE
         ]
         blocked = before - len(signals)
         if blocked:

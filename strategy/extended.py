@@ -21,8 +21,9 @@ from api.models import MarketData, Signal
 
 logger = logging.getLogger(__name__)
 
-STOP_LOSS_PCT  = 0.02
-TARGET_PCT     = 0.04
+import os as _os
+STOP_LOSS_PCT  = abs(float(_os.getenv("STOP_LOSS_PCT",  "-0.05")))  # 절댓값 사용
+TARGET_PCT     = float(_os.getenv("TARGET_PROFIT_PCT", "0.05"))
 
 
 # ── 공통 데이터 로드 ───────────────────────────────────────────────────────────
