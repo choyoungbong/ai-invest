@@ -189,6 +189,10 @@ async def calc_unrealized_pnl(db: AsyncSession) -> int:
         avg_price = sum(t.price * t.quantity for t in buy_trades) / total_qty
         code      = buy_trades[0].code
 
+        # 미국 주식(영문 코드)은 국내 KIS API로 현재가 조회 불가 → 제외
+        if not code.isdigit():
+            continue
+
         if is_market_open():
             current_price = 0
             try:

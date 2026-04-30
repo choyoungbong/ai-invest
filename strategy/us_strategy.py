@@ -289,12 +289,12 @@ async def generate_signal(symbol: str) -> Optional[dict]:
     vol_mult = volumes[-1] / avg_vol if avg_vol > 0 else 0
 
     cond_trend  = ema5 > ema20
-    cond_rsi    = rsi is not None and 20 <= rsi <= 85  # 최대 완화
+    cond_rsi    = rsi is not None and 35 <= rsi <= 75
     cond_vol    = vol_mult >= US_MIN_VOL_MULT
-    cond_price  = current_price >= ema20 * 0.97  # 최대 완화
+    cond_price  = current_price >= ema20 * 0.99
 
     cond_count = sum([cond_trend, cond_rsi, cond_vol, cond_price])
-    if cond_count < 2:  # 4개 중 2개 이상 충족 (최대 완화)
+    if cond_count < 3:  # 4개 중 3개 이상 충족
         logger.debug(
             f"[US 전략] {symbol} 신호 없음 | "
             f"추세:{'✅' if cond_trend else '❌'} "

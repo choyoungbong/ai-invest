@@ -353,7 +353,6 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
             )
             continue
 
-        sell_reason = "익절" if pnl_pct > 0 else "손절"
 
         # 매도 실행 (재시도 2회)
         result = {}

@@ -297,9 +297,9 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
     for row in retry_rows:
         if row.signal_id in sold_sids:
             continue
-        position = await _get_open_position(db, row.signal_id)
-        if not row.code.isdigit():  # 미국 주식 제외
+        if not row.code.isdigit():  # 미국 주식 제외 (먼저 체크)
             continue
+        position = await _get_open_position(db, row.signal_id)
         if not position:
             continue
         try:
