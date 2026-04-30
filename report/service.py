@@ -41,6 +41,9 @@ async def calc_pnl(db: AsyncSession, start: datetime, end: datetime) -> dict:
     details      = []
 
     for sell in sell_trades:
+        # 미국 주식(영문 코드) 제외 — USD 가격이 KRW로 계산되면 수치 오류
+        if not str(sell.code).isdigit():
+            continue
         # 연결된 매수 거래 조회
         buy_stmt = (
             select(Trade)

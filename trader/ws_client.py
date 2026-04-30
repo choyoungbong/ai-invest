@@ -273,7 +273,7 @@ class RealTimeMonitor:
         from trader.auto_stoploss import check_and_execute_auto_exit
         from sqlalchemy import select, and_
         from api.models import Trade
-        from trader.risk_manager import is_market_open, STOP_LOSS_PCT, TARGET_PCT
+        from trader.risk_manager import is_market_open
 
         # STOP_LOSS_PCT, TARGET_PCT 가져오기
         import os
@@ -341,6 +341,8 @@ class RealTimeMonitor:
             )).distinct()
             codes = (await db.execute(stmt)).scalars().all()
 
-        if codes:
-            update_subscribed_codes(list(codes))
-            logger.info(f"[RealTimeMonitor] 보유 종목 구독: {list(codes)}")
+        # 미국 주식(영문 코드) 제외 — 국내 WebSocket 구독 불가
+        domestic_codes = [c for c in codes if str(c).isdigit()]
+        if domestic_codes:
+            update_subscribed_codes(domestic_codes)
+            logger.info(f"[RealTimeMonitor] 보유 종목 구독: {domestic_codes}")
