@@ -3,7 +3,7 @@ DB 모델 — 수수료/슬리피지/부분체결/기술지표 컬럼 포함
   + 분할매수: Trade.phase / Trade.parent_trade_id
   + 블랙리스트: StockBlacklist
 """
-from sqlalchemy import Column, String, Float, Integer, DateTime, Boolean, Text, BigInteger, Numeric
+from sqlalchemy import Column, String, Float, Integer, DateTime, Boolean, Text, BigInteger, Numeric, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
 import uuid
@@ -40,6 +40,7 @@ class MarketData(Base):
     change_rate   = Column(Float)
     timestamp     = Column(DateTime, nullable=False, index=True)
     created_at    = Column(DateTime, server_default=func.now())
+    __table_args__ = (UniqueConstraint("code", "timestamp", name="uq_market_data_code_ts"),)
 
 
 class ScanResult(Base):

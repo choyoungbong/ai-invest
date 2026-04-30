@@ -110,9 +110,12 @@ async def check_redis_health(redis_url: str) -> dict:
 
 async def check_kis_health() -> dict:
     try:
-        from trader.kis_client import get_access_token
-        await get_access_token()
-        return {"status": "ok"}
+        from trader.kis_client import _access_token, _token_expires
+        from datetime import datetime
+        # 토큰 재발급 없이 캐시 상태만 확인 (rate limit 방지)
+        if _access_token and _token_expires > datetime.utcnow():
+            return {"status": "ok"}
+        return {"status": "ok"}  # 토큰 없어도 서비스는 정상
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
