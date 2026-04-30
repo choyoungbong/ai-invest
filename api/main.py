@@ -203,6 +203,9 @@ async def emergency_close_all(
 
     closed, failed = [], []
     for trade in buy_trades:
+        # 미국 주식(영문 코드) 제외 — 국내 KIS API로 매도 불가
+        if not trade.code.isdigit():
+            continue
         sold = (await db.execute(
             select(Trade).where(and_(
                 Trade.signal_id == trade.signal_id,

@@ -52,6 +52,8 @@ services:
       dockerfile: Dockerfile
     container_name: aiinvest-api
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://aiinvest:aiinvest@postgres:5432/aiinvest
       REDIS_URL: redis://redis:6379/0

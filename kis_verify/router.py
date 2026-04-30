@@ -90,7 +90,7 @@ async def verify_order():
     try:
         from trader.kis_client import get_access_token, buy_order
         await get_access_token()
-        result = await buy_order("005930", 1, 0, "01")  # 삼성전자 1주 시장가
+        result = await buy_order("005930", 1, "01")  # 삼성전자 1주 시장가
         return {"success": result["success"], "data": result}
     except Exception as e:
         return {"success": False, "error": str(e)}

@@ -99,9 +99,9 @@ async def execute_order(
 
     try:
         if signal.signal_type == "BUY":
-            result = await kis.buy_order(signal.code, qty, order_price, order_type_code)
+            result = await kis.buy_order(signal.code, qty, order_type_code)
         else:
-            result = await kis.sell_order(signal.code, qty, order_price, order_type_code)
+            result = await kis.sell_order(signal.code, qty, order_type_code)
     except Exception as e:
         logger.error(f"KIS 주문 오류: {e}")
         return {"success": False, "error": f"브로커 API 오류: {e}"}
@@ -177,6 +177,9 @@ async def check_stop_loss(db: AsyncSession) -> list[dict]:
 
     alerts = []
     for trade in trades:
+        # 미국 주식(영문 코드) 제외
+        if not trade.code.isdigit():
+            continue
         # 연결된 신호의 손절가 조회
         sig_stmt = select(Signal).where(Signal.id == trade.signal_id)
         signal   = (await db.execute(sig_stmt)).scalars().first()
