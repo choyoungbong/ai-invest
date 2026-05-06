@@ -109,7 +109,7 @@ async def check_ma_cross(
     code: str,
     name: str,
     short: int = 5,
-    long_: int = 20,
+    long_: int = 10,  # 20→10: 더 민감하게 신호 포착
 ) -> dict | None:
     data = await _fetch(db, code, days=long_ + 5)
     if len(data) < long_ + 2:
@@ -245,7 +245,7 @@ async def check_macd(
 STRATEGY_FUNCS = {
     "ma_cross":     check_ma_cross,
     "rsi_reversal": check_rsi_reversal,
-    "macd":         check_macd,
+    # "macd": 비활성 — 실전 데이터 승률 21%, 누적 -9.9만원 손실
 }
 
 

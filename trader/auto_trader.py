@@ -250,6 +250,12 @@ async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[di
             logger.warning(f"[{code}] 현재가 조회 실패: {e}")
             current_price = int(sig_price)
 
+        # 신호 유효시간 체크 (45분 초과 신호 제외 — 시스템 다운 후 묵은 신호 방지)
+        signal_age_minutes = (datetime.utcnow() - datetime.fromisoformat(sig.get("created_at", datetime.utcnow().isoformat()))).total_seconds() / 60
+        if signal_age_minutes > 45:
+            logger.info(f"[{code}] 신호 만료 ({signal_age_minutes:.0f}분 경과) — 건너뜀")
+            continue
+
         slip_exceeded, slip_pct = await check_slippage(sig_price, current_price)
         if slip_exceeded:
             logger.info(f"[{code}] 슬리피지 초과 ({slip_pct*100:.2f}%)")

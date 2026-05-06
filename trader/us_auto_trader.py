@@ -145,18 +145,19 @@ async def _execute_buy(db: AsyncSession, signal: dict) -> dict:
     await db.commit()
 
     now_kst = datetime.now(KST).strftime("%H:%M")
+    cond_count = signal.get("cond_count", 3)
+    strength = "🔥 최강" if cond_count == 4 else "✅ 보통"
     await send_message(
-        f"✅ <b>[AI INVEST 🇺🇸] 미국 ETF 매수</b>\n"
+        f"✅ <b>[AI INVEST 🇺🇸] 미국 매수 {strength}</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"📌 <b>{symbol}</b> — {signal['name']}\n"
-        f"💰 매수가: ${price:.2f}\n"
+        f"💰 매수가: ${price:.2f} | 신호강도: {cond_count}/4\n"
         f"🔢 수량: {quantity}주 / 투자금: ${amount_usd:.2f}\n"
         f"🎯 목표가: ${signal['target_price']:.2f} (+{signal['target_pct']*100:.1f}%)\n"
         f"🛑 손절가: ${signal['stop_loss']:.2f} ({signal['stop_pct']*100:.1f}%)\n"
         f"📊 RSI:{signal.get('rsi')} Vol:{signal.get('vol_mult')}x\n"
         f"🕐 {now_kst} KST"
     )
-
     logger.info(
         f"[US] 매수: {symbol} {quantity}주 @ ${price:.2f} = ${amount_usd:.2f}"
     )
@@ -263,6 +264,24 @@ async def run_us_trading(db: AsyncSession) -> list[dict]:
             logger.debug(f"[US] {symbol} 보유 중 — 건너뜀")
             continue
 
+        # 당일 손절 종목 재진입 방지
+        from sqlalchemy import select, and_
+        import pytz as _pytz
+        _kst_tz = _pytz.timezone("Asia/Seoul")
+        _today_kst = datetime.now(_kst_tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        _today_utc = _today_kst.astimezone(_pytz.utc).replace(tzinfo=None)
+        recent_stop = (await db.execute(
+            select(Trade).where(and_(
+                Trade.code == symbol,
+                Trade.order_type == "SELL",
+                Trade.status == "FILLED",
+                Trade.created_at >= _today_utc,
+            ))
+        )).scalars().first()
+        if recent_stop:
+            logger.info(f"[US] {symbol} 당일 매도 이력 — 재진입 방지")
+            continue
+
         try:
             signal = await generate_signal(symbol)
         except Exception as e:
@@ -329,6 +348,25 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
             continue
 
         pnl_pct = (current_price / trade.price - 1)
+
+        # ── 미국 개장 초반 15분 손절 유예 ────────────────────────────────────
+        import pytz as _pytz
+        _kst = _pytz.timezone("Asia/Seoul")
+        _now_kst = datetime.now(_kst)
+        _market_open_kst = _now_kst.replace(hour=22, minute=30, second=0, microsecond=0)
+        # 새벽 0시 이후라면 전날 22:30 기준
+        if _now_kst.hour < 12:
+            from datetime import timedelta as _td
+            _market_open_kst = (_now_kst - _td(days=1)).replace(hour=22, minute=30, second=0, microsecond=0)
+        _elapsed_min = (_now_kst - _market_open_kst).total_seconds() / 60
+        _in_early_session = 0 <= _elapsed_min < 15
+        hard_stop_pct = cfg["stop_loss"] * 2  # 손절의 2배 = 하드스탑 (예: -4% → -8%)
+        if _in_early_session and pnl_pct <= cfg["stop_loss"]:
+            if pnl_pct <= hard_stop_pct:
+                logger.warning(f"[US] {trade.code} 개장 초반 하드스탑 ({pnl_pct*100:+.2f}%) — 즉시 청산")
+            else:
+                logger.info(f"[US] {trade.code} 개장 초반 손절 유예 중 ({pnl_pct*100:+.2f}%) — {15 - _elapsed_min:.0f}분 남음")
+                continue
 
         # ── 미국 트레일링 스탑 (+5% 이상 수익 시 고점 대비 -3% 이탈하면 청산)
         signal_id = trade.signal_id

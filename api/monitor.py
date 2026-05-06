@@ -89,12 +89,22 @@ class ErrorMonitorMiddleware(BaseHTTPMiddleware):
 # ── 헬스체크 함수들 ────────────────────────────────────────────────────────────
 
 async def check_db_health(db_factory) -> dict:
-    try:
-        async with db_factory() as db:
-            await db.execute(__import__("sqlalchemy").text("SELECT 1"))
-        return {"status": "ok"}
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
+    # 일시적 오류 대비 2회 재시도
+    import asyncio
+    for attempt in range(2):
+        try:
+            async with db_factory() as db:
+                await db.execute(__import__("sqlalchemy").text("SELECT 1"))
+            return {"status": "ok"}
+        except Exception as e:
+            if attempt == 0:
+                await asyncio.sleep(2)  # 2초 후 재시도
+            else:
+                detail = str(e).strip()
+                if not detail:
+                    detail = "DB 연결 일시 오류 (빈 메시지)"
+                return {"status": "error", "detail": detail}
+    return {"status": "ok"}
 
 
 async def check_redis_health(redis_url: str) -> dict:
@@ -129,15 +139,23 @@ async def run_health_check_and_notify(db_factory, redis_url: str):
     all_ok = all(h["status"] == "ok" for h in [db_h, redis_h, kis_h])
 
     if not all_ok:
-        lines = ["🔴 <b>[AI INVEST] 헬스체크 이상 감지</b>\n━━━━━━━━━━━━━━━━━━"]
-        for name, result in [("PostgreSQL", db_h), ("Redis", redis_h), ("KIS API", kis_h)]:
-            icon = "✅" if result["status"] == "ok" else "❌"
-            line = f"{icon} {name}"
-            if result["status"] != "ok":
-                line += f": {result.get('detail', '')[:80]}"
-            lines.append(line)
-        await send_message("\n".join(lines))
-        logger.error(f"헬스체크 이상: DB={db_h}, Redis={redis_h}, KIS={kis_h}")
+        # 빈 오류 메시지는 일시적 연결 오류 → 알림 생략
+        real_errors = [
+            (n, r) for n, r in [("PostgreSQL", db_h), ("Redis", redis_h), ("KIS API", kis_h)]
+            if r["status"] != "ok" and r.get("detail", "").strip()
+        ]
+        if real_errors:
+            lines_msg = ["🔴 <b>[AI INVEST] 헬스체크 이상 감지</b>\n━━━━━━━━━━━━━━━━━━"]
+            for name, result in [("PostgreSQL", db_h), ("Redis", redis_h), ("KIS API", kis_h)]:
+                icon = "✅" if result["status"] == "ok" else "❌"
+                line_txt = f"{icon} {name}"
+                if result["status"] != "ok":
+                    line_txt += f": {result.get('detail', '')[:80]}"
+                lines_msg.append(line_txt)
+            await send_message("\n".join(lines_msg))
+            logger.error(f"헬스체크 이상: DB={db_h}, Redis={redis_h}, KIS={kis_h}")
+        else:
+            logger.warning(f"헬스체크 일시 오류 (빈 메시지) — 알림 생략")
 
     return {"db": db_h, "redis": redis_h, "kis": kis_h, "all_ok": all_ok}
 

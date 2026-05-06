@@ -132,6 +132,17 @@ async def _run_strategy_and_trade(db, now_str: str) -> tuple[list, list]:
     if len(all_candidates) > available_slots:
         logger.info(f"[슬롯 제한] 신호 {len(all_candidates)}건 → {available_slots}건 (슬롯 {current_cnt}/{MAX_POSITIONS})")
 
+    # 슬롯 0개일 때 손실 포지션 자동 청산 시도 후 재계산
+    if available_slots == 0 and all_candidates:
+        logger.info("[슬롯 제한] 슬롯 꽉 참 — 손절 체크 후 재시도")
+        from trader.auto_stoploss import check_and_execute_stop_loss
+        closed = await check_and_execute_stop_loss(db)
+        if closed:
+            pos_hit, current_cnt = await check_max_positions(db)
+            available_slots = max(0, MAX_POSITIONS - current_cnt)
+            all_signals = all_candidates[:available_slots]
+            logger.info(f"[슬롯 제한] 청산 {len(closed)}건 후 슬롯 {available_slots}개 확보")
+
     if all_signals:
         await analyze_all_new_signals(db)
 

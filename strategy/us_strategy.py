@@ -304,11 +304,30 @@ async def generate_signal(symbol: str) -> Optional[dict]:
         )
         return None
 
+    # 신호 강도별 익절/손절 차등 적용
+    # 4/4 강한 신호: 익절 +10%, 손절 -5% (더 여유있게)
+    # 3/4 보통 신호: 익절 +8%, 손절 -4% (기본)
+    base_target = cfg["target_profit"]
+    base_stop   = cfg["stop_loss"]
+    if cond_count == 4:
+        adj_target = base_target * 1.25   # +8% → +10%
+        adj_stop   = base_stop * 1.25     # -4% → -5%
+        confidence = 0.9
+    else:
+        adj_target = base_target          # +8%
+        adj_stop   = base_stop            # -4%
+        confidence = 0.6
+    target = round(current_price * (1 + adj_target), 4)
+    stop   = round(current_price * (1 + adj_stop), 4)
+
     logger.info(
         f"[US 전략] 신호: {symbol} @ ${current_price:.2f} | "
         f"목표 ${target:.2f} / 손절 ${stop:.2f} | "
         f"RSI:{rsi} EMA5:{ema5:.2f} EMA20:{ema20:.2f} Vol:{vol_mult:.1f}x"
     )
+
+    # 4/4 신호는 더 많은 예산 배분
+    budget = cfg["budget_ratio"] * (1.5 if cond_count == 4 else 1.0)
 
     return {
         "symbol":       symbol,
@@ -317,9 +336,11 @@ async def generate_signal(symbol: str) -> Optional[dict]:
         "price":        current_price,
         "target_price": target,
         "stop_loss":    stop,
-        "target_pct":   cfg["target_profit"],
-        "stop_pct":     cfg["stop_loss"],
-        "budget_ratio": cfg["budget_ratio"],
+        "target_pct":   adj_target,
+        "stop_pct":     adj_stop,
+        "budget_ratio": min(budget, 1/3),  # 최대 1/3
+        "confidence":   confidence,
+        "cond_count":   cond_count,
         "rsi":          rsi,
         "ema5":         round(ema5, 4),
         "ema20":        round(ema20, 4),
