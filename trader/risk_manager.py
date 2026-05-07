@@ -299,6 +299,8 @@ async def _check_max_positions_db(db: AsyncSession) -> tuple[bool, int]:
             Trade.status.in_(["FILLED", "PARTIAL"]),
         )).distinct()
     )).scalars().all()
+    # 미국 주식(영문 코드) 제외 — 국내 슬롯만 카운트
+    open_codes = [c for c in open_codes if str(c).isdigit()]
 
     active_codes = []
     for code in open_codes:
