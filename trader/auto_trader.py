@@ -266,14 +266,14 @@ async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[di
         adjusted_total  = _calc_atr_adjusted_amount(strategy_amount, atr_pct, code)
         phase1_amt      = _phase1_amount(adjusted_total)
 
+        # 현재가가 1차금액보다 비싸도 최소 1주는 매수 (대형주 스킵 방지)
         if current_price > phase1_amt:
-            logger.info(f"[{code}] 현재가 {current_price:,} > 1차금액 {phase1_amt:,} — 건너뜀")
-            await send_message(
-                f"⏭️ <b>[AI INVEST] 매수 건너뜀</b>\n"
-                f"📌 {name} ({code})\n"
-                f"💰 현재가 {current_price:,}원 > 1차 매수금액 {phase1_amt:,}원"
-            )
-            continue
+            if current_price > adjusted_total:
+                logger.info(f"[{code}] 현재가 {current_price:,} > 총배분금액 {adjusted_total:,} — 건너뜀")
+                continue
+            # 1주만 매수
+            phase1_amt = current_price
+            logger.info(f"[{code}] 현재가 > 1차금액 → 1주 매수로 조정 ({current_price:,}원)")
 
         trade_data = await _execute_buy(
             db, code, name, signal_id, current_price, phase1_amt, phase=1
