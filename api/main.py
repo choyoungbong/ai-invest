@@ -129,8 +129,9 @@ async def strategy_run(
 ):
     candidates = await run_scanner(db, top_n=top_n)
     signals    = await run_strategy(db, candidates)
-    if signals:
-        await analyze_all_new_signals(db)
+    # AI 분석 비활성화 (ANTHROPIC_API_KEY 크레딧 부족)
+    # if signals:
+    #     await analyze_all_new_signals(db)
     await notify_signals_summary(signals)
 
     orders = []
