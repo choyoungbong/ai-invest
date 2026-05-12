@@ -413,10 +413,12 @@ async def run_strategy(
 
     from trader.risk_manager import _kst_today_start_utc
     today_start_utc = _kst_today_start_utc()
+    # 오늘 이미 실행된(매수된) 종목만 차단 — 미실행 신호는 재신호 허용
     already_today = set(
         (await db.execute(
             select(Signal.code).where(and_(
                 Signal.created_at >= today_start_utc,
+                Signal.is_executed == True,
             ))
         )).scalars().all()
     )
