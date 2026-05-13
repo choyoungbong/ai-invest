@@ -12,6 +12,9 @@ import uuid
 import os
 
 from datetime import datetime, timedelta
+
+MIN_TRADING_VALUE = int(os.getenv("MIN_TRADING_VALUE", "3000000000"))
+MIN_CONFIDENCE    = float(os.getenv("MIN_CONFIDENCE", "0.55"))
 from typing import Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -265,6 +268,13 @@ async def run_extended_strategy(
         code = item["code"]
         name = item.get("name", code)
 
+        # 거래대금 필터 (소형주 차단)
+        if MIN_TRADING_VALUE > 0:
+            tv = item.get("trading_value", 0)
+            if tv < MIN_TRADING_VALUE:
+                logger.debug(f"[{code}] {name} 거래대금 부족: {tv/1e8:.0f}억 < {MIN_TRADING_VALUE/1e8:.0f}억 — 차단")
+                continue
+
         for strat_name in target_strategies:
             fn = STRATEGY_FUNCS.get(strat_name)
             if not fn:
@@ -278,7 +288,12 @@ async def run_extended_strategy(
             # 수정 — KIS 실시간 현재가로 신호 가격 업데이트
             if sig is None:
                 continue
-            
+
+            # 신뢰도 필터 (MIN_CONFIDENCE 미달 신호 제외)
+            if sig.get("confidence", 0) < MIN_CONFIDENCE:
+                logger.debug(f"[{code}] {strat_name} 신뢰도 미달: {sig.get('confidence',0):.2f} < {MIN_CONFIDENCE}")
+                continue
+
             # 실시간 현재가로 가격 보정
             try:
                 from trader import kis_client as kis

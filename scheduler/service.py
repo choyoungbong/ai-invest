@@ -143,8 +143,9 @@ async def _run_strategy_and_trade(db, now_str: str) -> tuple[list, list]:
             all_signals = all_candidates[:available_slots]
             logger.info(f"[슬롯 제한] 청산 {len(closed)}건 후 슬롯 {available_slots}개 확보")
 
-    if all_signals:
-        await analyze_all_new_signals(db)
+    # AI 분석 비활성화 (ANTHROPIC_API_KEY 크레딧 부족)
+    # if all_signals:
+    #     await analyze_all_new_signals(db)
 
     today_kst = datetime.now(KST).date()
 

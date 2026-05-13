@@ -326,8 +326,12 @@ class RealTimeMonitor:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"[RealTimeMonitor] 처리 오류: {e}")
-                await asyncio.sleep(1)
+                err_msg = str(e)
+                if "connection is closed" in err_msg or "InterfaceError" in err_msg:
+                    logger.warning(f"[RealTimeMonitor] DB 연결 일시 오류 — 재시도: {e}")
+                else:
+                    logger.error(f"[RealTimeMonitor] 처리 오류: {e}")
+                await asyncio.sleep(2)
 
     async def subscribe_holdings(self):
         """현재 보유 종목 구독"""
