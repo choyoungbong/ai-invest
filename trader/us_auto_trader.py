@@ -371,7 +371,7 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
         # ── 미국 트레일링 스탑 (+5% 이상 수익 시 고점 대비 -3% 이탈하면 청산)
         signal_id = trade.signal_id
         sell_reason = "익절" if pnl_pct > 0 else "손절"
-        if pnl_pct >= 0.05:
+        if pnl_pct >= 0.03:
             prev_high = _us_trailing_high.get(signal_id, current_price)
             _us_trailing_high[signal_id] = max(prev_high, current_price)
             trail_stop = _us_trailing_high[signal_id] * 0.97
