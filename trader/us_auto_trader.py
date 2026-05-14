@@ -359,13 +359,13 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
             from datetime import timedelta as _td
             _market_open_kst = (_now_kst - _td(days=1)).replace(hour=22, minute=30, second=0, microsecond=0)
         _elapsed_min = (_now_kst - _market_open_kst).total_seconds() / 60
-        _in_early_session = 0 <= _elapsed_min < 15
+        _in_early_session = 0 <= _elapsed_min < 30
         hard_stop_pct = cfg["stop_loss"] * 2  # 손절의 2배 = 하드스탑 (예: -4% → -8%)
         if _in_early_session and pnl_pct <= cfg["stop_loss"]:
             if pnl_pct <= hard_stop_pct:
                 logger.warning(f"[US] {trade.code} 개장 초반 하드스탑 ({pnl_pct*100:+.2f}%) — 즉시 청산")
             else:
-                logger.info(f"[US] {trade.code} 개장 초반 손절 유예 중 ({pnl_pct*100:+.2f}%) — {15 - _elapsed_min:.0f}분 남음")
+                logger.info(f"[US] {trade.code} 개장 초반 손절 유예 중 ({pnl_pct*100:+.2f}%) — {30 - _elapsed_min:.0f}분 남음")
                 continue
 
         # ── 미국 트레일링 스탑 (+5% 이상 수익 시 고점 대비 -3% 이탈하면 청산)
