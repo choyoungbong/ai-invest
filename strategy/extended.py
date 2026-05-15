@@ -264,9 +264,24 @@ async def run_extended_strategy(
     target_strategies = strategies or list(STRATEGY_FUNCS.keys())
     signals = []
 
+    # 오늘 이미 신호 발생한 종목 차단 (재매수 방지)
+    from datetime import timezone
+    today_start_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    from sqlalchemy import select as _select
+    already_today = set(
+        (await db.execute(
+            _select(Signal.code).where(Signal.created_at >= today_start_utc)
+        )).scalars().all()
+    )
+
     for item in candidates:
         code = item["code"]
         name = item.get("name", code)
+
+        # 오늘 이미 신호 발생한 종목 제외
+        if code in already_today:
+            logger.debug(f"[{code}] {name} 오늘 이미 신호 발생 — 차단")
+            continue
 
         # 거래대금 필터 (소형주 차단)
         if MIN_TRADING_VALUE > 0:
