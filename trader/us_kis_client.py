@@ -41,19 +41,18 @@ BASE_URL = (
 # 대상 ETF 거래소 코드
 # 주문용 거래소 코드 (KIS 주문 API) — NYSE or NASD
 EXCHANGE_MAP = {
-    "MARA": "NYSE", "JOBY": "NYSE", "GRAB": "NASD", "OPEN": "NASD",
+    "MARA": "NASD", "JOBY": "NYSE", "GRAB": "NASD", "OPEN": "NASD",
     "CLOV": "NASD", "SOFI": "NYSE", "RIVN": "NASD", "DKNG": "NASD",
     "CHWY": "NYSE", "SNAP": "NYSE", "LCID": "NASD", "PLUG": "NASD",
-    "TLRY": "NYSE", "VALE": "NYSE",
+    "TLRY": "NASD", "VALE": "NYSE",
     "SPLG": "NYSE", "TQQQ": "NASD", "SOXL": "NYSE",
 }
 # 시세 조회용 거래소 코드 (KIS 시세 API) — 종목별 상이
 EXCHANGE_MAP_QUOTE = {
     "MARA": "NAS", "JOBY": "NYS", "GRAB": "NAS", "OPEN": "NAS",
-    "CLOV": "NAS", "SOFI": "NAS", "RIVN": "NAS", "DKNG": "NAS",
+    "CLOV": "NAS", "SOFI": "NYS", "RIVN": "NAS", "DKNG": "NAS",
     "CHWY": "NYS", "SNAP": "NYS", "LCID": "NAS", "PLUG": "NAS",
-    "TLRY": "NAS", "VALE": "NYS",
-    "SPLG": "NYS", "TQQQ": "NAS", "SOXL": "AMS",
+    "TLRY": "NAS", "TQQQ": "NAS", "SPLG": "NYS", "SOXL": "NYS", "VALE": "NYS",
 }
 
 # 토큰 캐시

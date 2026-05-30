@@ -112,26 +112,23 @@ def _phase2_amount(total: int) -> int:
 # ── 포지션 보유 확인 ──────────────────────────────────────────────────────────
 
 async def _has_open_position(db: AsyncSession, code: str) -> bool:
-    buy_trades = (await db.execute(
-        select(Trade).where(and_(
+    """수량 기반 오픈 포지션 확인 (signal_id NULL 버그 수정)"""
+    from sqlalchemy import func
+    bought = (await db.execute(
+        select(func.coalesce(func.sum(Trade.quantity), 0)).where(and_(
             Trade.code == code,
             Trade.order_type == "BUY",
             Trade.status == "FILLED",
         ))
-    )).scalars().all()
-    if not buy_trades:
-        return False
-    for buy in buy_trades:
-        sell = (await db.execute(
-            select(Trade).where(and_(
-                Trade.signal_id == buy.signal_id,
-                Trade.order_type == "SELL",
-                Trade.status.in_(["FILLED", "CLOSED"]),
-            ))
-        )).scalars().first()
-        if not sell:
-            return True
-    return False
+    )).scalar() or 0
+    sold = (await db.execute(
+        select(func.coalesce(func.sum(Trade.quantity), 0)).where(and_(
+            Trade.code == code,
+            Trade.order_type == "SELL",
+            Trade.status.in_(["FILLED", "CLOSED"]),
+        ))
+    )).scalar() or 0
+    return bought > sold
 
 
 # ── 매수 실행 ─────────────────────────────────────────────────────────────────
@@ -223,6 +220,12 @@ async def auto_execute_signals(db: AsyncSession, signals: list[dict]) -> list[di
             auto_execute_signals._last_block_reason = reason
         return []
 
+    # ── 시장 레짐 필터 ──────────────────────────────────────────────────
+    from trader.market_regime import get_market_regime
+    regime, breadth = await get_market_regime(db)
+    if regime == "bear":
+        logger.info(f"[레짐] 하락장 감지 ({breadth:.1%}) — 신규 매수 전체 차단")
+        return []
     executed = []
 
     for sig in signals:

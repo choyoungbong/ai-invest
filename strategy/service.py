@@ -404,6 +404,119 @@ def _calc_confidence(
 
 # ── 전략 엔진 메인 ─────────────────────────────────────────────────────────────
 
+
+def _calc_pullback_confidence(today, ma5, ma20, rsi, avg_value, macd_data) -> float:
+    """눌림목 전략 신뢰도 계산"""
+    score = 0.0
+    if ma5 and ma20:
+        score += min((ma5 - ma20) / ma20 * 6, 0.25)
+    if rsi is not None:
+        if 52 <= rsi <= 65:   score += 0.25
+        elif 47 <= rsi < 52 or 65 < rsi <= 70: score += 0.12
+        elif 40 <= rsi < 47:  score += 0.06
+    if avg_value > 0:
+        score += min(today.trading_value / avg_value * 0.10, 0.20)
+    if macd_data.get("histogram") and macd_data["histogram"] > 0:
+        score += min(macd_data["histogram"] * 0.5, 0.15)
+    if 0.3 <= today.change_rate <= 3.0: score += 0.15
+    elif 0 < today.change_rate < 0.3:   score += 0.08
+    return round(min(score, 1.0), 3)
+
+
+async def check_pullback(db: AsyncSession, code: str, name: str) -> Optional[dict]:
+    """
+    눌림목 전략: 상승 추세 중 MA5 지지 눌림 후 회복 시 매수
+    조건: MA5>MA20 + MA20 우상향 + 최근 MA5 터치 + 오늘 회복 + RSI 40~68
+    """
+    rows = await _fetch_recent_data(db, code, days=60)
+    if len(rows) < 30:
+        return None
+    today   = rows[0]
+    history = rows[1:]
+    if not today.close or today.close <= 0:
+        return None
+    closes = [r.close for r in [today] + list(history) if r.close]
+    if len(closes) < 25:
+        return None
+
+    ma5  = _calc_ma(closes, 5)
+    ma20 = _calc_ma(closes, 20)
+    if not ma5 or not ma20:
+        return None
+
+    # 조건 1: MA5 > MA20 (상승 추세)
+    if ma5 <= ma20 * 1.001:
+        return None
+
+    # 조건 2: MA20 우상향 (5일 전 MA20보다 현재가 높아야)
+    closes_5ago = [r.close for r in rows[5:] if r.close]
+    if len(closes_5ago) < 20:
+        return None
+    ma20_5ago = _calc_ma(closes_5ago, 20)
+    if not ma20_5ago or ma20 <= ma20_5ago:
+        return None
+
+    # 조건 3: 최근 3~5일 내 MA5 근처까지 눌림 (저점이 MA5 ±3% 이내)
+    recent_lows = [r.low for r in rows[1:5] if r.low]
+    if not recent_lows or not (ma5 * 0.97 <= min(recent_lows) <= ma5 * 1.03):
+        return None
+
+    # 조건 4: 오늘 MA5 위로 회복 + 전일 대비 상승
+    if today.close <= ma5:
+        return None
+    prev_close = history[0].close if history else None
+    if prev_close and today.close < prev_close * 1.003:
+        return None
+
+    # 조건 5: 당일 급등 제외 (추격 방지)
+    if today.change_rate > 5.0:
+        return None
+
+    # 거래대금 필터
+    past_values = [r.trading_value for r in history[:10] if r.trading_value]
+    avg_value = sum(past_values) / len(past_values) if past_values else 0
+    if MIN_TRADING_VALUE > 0 and today.trading_value < MIN_TRADING_VALUE:
+        return None
+
+    # 갭상승 필터
+    if GAP_UP_FILTER_ENABLED and today.open and history and history[0].close:
+        if (today.open - history[0].close) / history[0].close * 100 > MAX_GAP_UP_PCT:
+            return None
+
+    # 기술지표
+    rsi       = _calc_rsi(closes, period=14)
+    macd_data = _calc_macd(closes)
+    bb        = _calc_bollinger(closes)
+    atr_val   = _calc_atr(list(reversed(rows[:15])), period=14)
+    atr_pct   = round(atr_val / today.close * 100, 2) if atr_val and today.close else None
+
+    # RSI 필터
+    if rsi is None or not (40 <= rsi <= 68):
+        return None
+    # ATR 필터
+    if ATR_FILTER_ENABLED and atr_pct and atr_pct > ATR_FILTER_MAX_PCT:
+        return None
+
+    confidence = _calc_pullback_confidence(today, ma5, ma20, rsi, avg_value, macd_data)
+    if confidence < MIN_CONFIDENCE:
+        return None
+
+    price     = today.close
+    stop_loss = round(price * (1 + STOP_LOSS_PCT), 0)
+    target    = round(price * (1 + TARGET_PROFIT_PCT), 0)
+    reason    = (f"MA5({ma5:,.0f}) 지지 회복 | "
+                 f"MA갭 {(ma5/ma20-1)*100:+.1f}% | "
+                 f"RSI {rsi:.1f} | 거래대금 {today.trading_value/1e8:.0f}억")
+    logger.info(f"[눌림목] 신호 [{code} {name}] @ {price:,.0f} 신뢰도:{confidence:.2f} RSI:{rsi:.1f}")
+    return {
+        "code": code, "name": name, "signal_type": "BUY", "strategy": "pullback",
+        "price": price, "target_price": target, "stop_loss": stop_loss,
+        "reason": reason, "confidence": confidence, "rsi": rsi,
+        "macd": macd_data["macd"], "macd_signal": macd_data["signal"],
+        "bb_upper": bb["upper"], "bb_lower": bb["lower"],
+        "atr": atr_val, "atr_pct": atr_pct,
+    }
+
 async def run_strategy(
     db: AsyncSession,
     candidates: List[dict],
@@ -428,11 +541,17 @@ async def run_strategy(
             logger.debug(f"[{code}] 오늘 이미 신호 존재 — 건너뜀")
             continue
 
+        sig = None
         try:
             sig = await check_breakout(db, code, name)
         except Exception as e:
-            logger.error(f"전략 오류 [{code}]: {e}")
-            continue
+            logger.error(f"전략 오류 [breakout][{code}]: {e}")
+
+        if sig is None:
+            try:
+                sig = await check_pullback(db, code, name)
+            except Exception as e:
+                logger.error(f"전략 오류 [pullback][{code}]: {e}")
 
         if sig is None:
             continue

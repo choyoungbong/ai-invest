@@ -36,7 +36,6 @@ US_ETF_CONFIG: dict[str, dict] = {
     "GRAB": {"name": "Grab Holdings",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
     "OPEN": {"name": "Opendoor Technologies",     "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
     "CLOV": {"name": "Clover Health",             "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
-    "SOFI": {"name": "SoFi Technologies",         "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
     "RIVN": {"name": "Rivian Automotive",         "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
     "DKNG": {"name": "DraftKings",                "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},
     "CHWY": {"name": "Chewy",                     "exchange": "NAS", "target_profit": float(os.getenv("US_TARGET_PCT", "0.03")), "stop_loss": float(os.getenv("US_STOP_PCT", "-0.02")), "budget_ratio": 1/6},

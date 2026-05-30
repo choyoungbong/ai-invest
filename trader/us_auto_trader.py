@@ -30,6 +30,7 @@ KST = pytz.timezone("Asia/Seoul")
 
 US_TRADING_ENABLED = os.getenv("US_TRADING_ENABLED", "false").lower() == "true"
 US_TOTAL_BUDGET    = float(os.getenv("US_TOTAL_BUDGET_USD", "200"))
+US_MAX_HOLD_DAYS    = int(os.getenv("US_MAX_HOLD_DAYS", "5"))
 
 
 # ── 포지션 확인 ───────────────────────────────────────────────────────────────
@@ -328,7 +329,7 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
     for trade in buy_trades:
         sold = (await db.execute(
             select(Trade).where(and_(
-                Trade.signal_id == trade.signal_id,
+                Trade.code == trade.code,
                 Trade.order_type == "SELL",
                 Trade.status.in_(["FILLED", "CLOSED"]),
             ))
@@ -383,6 +384,15 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
                 should_sell = pnl_pct >= cfg["target_profit"] or pnl_pct <= cfg["stop_loss"]
         else:
             should_sell = pnl_pct >= cfg["target_profit"] or pnl_pct <= cfg["stop_loss"]
+        # 최대 보유일 초과 시 강제 청산
+        if not should_sell and US_MAX_HOLD_DAYS > 0:
+            from datetime import timezone as _tz
+            hold_days = (datetime.now(_tz.utc) - trade.created_at.replace(tzinfo=_tz.utc)).days
+            if hold_days >= US_MAX_HOLD_DAYS:
+                should_sell = True
+                sell_reason = f"보유기간 초과 ({hold_days}일, {pnl_pct*100:+.2f}%)"
+                logger.info(f"[US] {trade.code} 보유기간 초과 청산: {hold_days}일 ({pnl_pct*100:+.2f}%)")
+
         if not should_sell:
             logger.debug(
                 f"[US] {trade.code} 보유: ${trade.price:.2f}→${current_price:.2f} "
