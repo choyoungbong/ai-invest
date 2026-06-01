@@ -32,8 +32,7 @@ TARGET_PCT     = float(_os.getenv("TARGET_PROFIT_PCT", "0.05"))
 # ── 공통 데이터 로드 ───────────────────────────────────────────────────────────
 
 async def _fetch(db: AsyncSession, code: str, days: int) -> list[dict]:
-    from datetime import timezone as _tz2
-    cutoff = datetime.now(_tz2.utc) - timedelta(days=days + 5)
+    cutoff = datetime.utcnow() - timedelta(days=days + 5)
     stmt = (
         select(MarketData)
         .where(and_(MarketData.code == code, MarketData.timestamp >= cutoff))
@@ -267,7 +266,7 @@ async def run_extended_strategy(
 
     # 오늘 이미 신호 발생한 종목 차단 (재매수 방지)
     from datetime import timezone
-    today_start_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_utc = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     from sqlalchemy import select as _select
     already_today = set(
         (await db.execute(
@@ -326,8 +325,7 @@ async def run_extended_strategy(
 
             # 오늘 이미 같은 종목 신호 있으면 건너뜀 (전략 무관)
             from trader.risk_manager import _kst_today_start_utc
-            from datetime import timezone as _tz
-            today_start = _kst_today_start_utc().replace(tzinfo=_tz.utc)
+            today_start = _kst_today_start_utc()
             existing = (await db.execute(
                 select(Signal).where(and_(
                     Signal.code == code,
