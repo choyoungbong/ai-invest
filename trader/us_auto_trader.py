@@ -326,16 +326,42 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
 
     executed = []
 
+    processed_codes = set()
     for trade in buy_trades:
-        sold = (await db.execute(
-            select(Trade).where(and_(
+        if trade.code in processed_codes:
+            continue
+        # 수량 기반 오픈 포지션 확인 (CLOSED 제외 - 5/25 메모리얼데이 버그 수정)
+        from sqlalchemy import func as _sqlfunc
+        bought_qty = (await db.execute(
+            select(_sqlfunc.coalesce(_sqlfunc.sum(Trade.quantity), 0)).where(and_(
+                Trade.code == trade.code,
+                Trade.order_type == "BUY",
+                Trade.status == "FILLED",
+            ))
+        )).scalar() or 0
+        sold_qty = (await db.execute(
+            select(_sqlfunc.coalesce(_sqlfunc.sum(Trade.quantity), 0)).where(and_(
                 Trade.code == trade.code,
                 Trade.order_type == "SELL",
-                Trade.status.in_(["FILLED", "CLOSED"]),
+                Trade.status == "FILLED",
             ))
-        )).scalars().first()
-        if sold:
+        )).scalar() or 0
+        if bought_qty <= sold_qty:
             continue
+        processed_codes.add(trade.code)
+        # 가중평균 매수가 + 오픈 수량 계산
+        _avg_price_result = (await db.execute(
+            select(_sqlfunc.sum(Trade.price * Trade.quantity) / _sqlfunc.sum(Trade.quantity)).where(and_(
+                Trade.code == trade.code,
+                Trade.order_type == "BUY",
+                Trade.status == "FILLED",
+            ))
+        )).scalar()
+        _avg_price   = float(_avg_price_result) if _avg_price_result else float(trade.price)
+        _open_qty    = bought_qty - sold_qty
+        _signal_id   = trade.signal_id
+        _code        = trade.code
+        _created_at  = trade.created_at
 
         cfg = US_ETF_CONFIG.get(trade.code)
         if not cfg:
@@ -348,7 +374,7 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
             logger.warning(f"[US] {trade.code} 현재가 실패: {e}")
             continue
 
-        pnl_pct = (current_price / trade.price - 1)
+        pnl_pct = (current_price / _avg_price - 1)
 
         # ── 미국 개장 초반 15분 손절 유예 ────────────────────────────────────
         import pytz as _pytz
@@ -370,7 +396,7 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
                 continue
 
         # ── 미국 트레일링 스탑 (+5% 이상 수익 시 고점 대비 -3% 이탈하면 청산)
-        signal_id = trade.signal_id
+        signal_id = _signal_id
         sell_reason = "익절" if pnl_pct > 0 else "손절"
         if pnl_pct >= 0.03:
             prev_high = _us_trailing_high.get(signal_id, current_price)
@@ -387,7 +413,7 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
         # 최대 보유일 초과 시 강제 청산
         if not should_sell and US_MAX_HOLD_DAYS > 0:
             from datetime import timezone as _tz
-            hold_days = (datetime.now(_tz.utc) - trade.created_at.replace(tzinfo=_tz.utc)).days
+            hold_days = (datetime.now(_tz.utc) - _created_at.replace(tzinfo=_tz.utc)).days
             if hold_days >= US_MAX_HOLD_DAYS:
                 should_sell = True
                 sell_reason = f"보유기간 초과 ({hold_days}일, {pnl_pct*100:+.2f}%)"
@@ -395,7 +421,7 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
 
         if not should_sell:
             logger.debug(
-                f"[US] {trade.code} 보유: ${trade.price:.2f}→${current_price:.2f} "
+                f"[US] {_code} 보유: ${_avg_price:.2f}→${current_price:.2f} "
                 f"({pnl_pct*100:+.2f}%) | "
                 f"익절 +{cfg['target_profit']*100:.1f}% / 손절 {cfg['stop_loss']*100:.1f}%"
             )
@@ -403,10 +429,11 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
 
 
         # 매도 실행 (재시도 2회)
+        _sell_qty = bought_qty - sold_qty
         result = {}
         for attempt in range(1, 3):
             try:
-                result = await us_sell_order(trade.code, trade.quantity, current_price)
+                result = await us_sell_order(trade.code, _sell_qty, current_price)
                 if result.get("success"):
                     break
                 logger.warning(f"[US] {trade.code} 매도 재시도 {attempt}")
@@ -414,7 +441,7 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
                 logger.error(f"[US] {trade.code} 매도 오류: {e}")
 
         status  = "FILLED" if result.get("success") else "FAILED"
-        pnl_usd = (current_price - trade.price) * trade.quantity
+        pnl_usd = (current_price - _avg_price) * _open_qty
 
         await db.execute(
             Trade.__table__.insert().values(
@@ -424,9 +451,9 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
                 name=trade.name,
                 order_type="SELL",
                 price=current_price,
-                quantity=trade.quantity,
-                amount=current_price * trade.quantity,
-                commission=round(current_price * trade.quantity * 0.00015, 4),
+                quantity=_open_qty,
+                amount=current_price * _open_qty,
+                commission=round(current_price * _open_qty * 0.00015, 4),
                 real_profit=round(pnl_usd, 4),
                 status=status,
                 broker_order_id=result.get("order_no", ""),
@@ -451,7 +478,7 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
             f"{emoji} <b>[AI INVEST 🇺🇸] {sell_reason}</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"📌 <b>{trade.code}</b>\n"
-            f"💰 ${trade.price:.2f} → ${current_price:.2f}\n"
+            f"💰 ${_avg_price:.2f} → ${current_price:.2f}\n"
             f"📊 {pnl_pct*100:+.2f}% / ${pnl_usd:+.2f}\n"
             f"🕐 {now_kst} KST"
         )
