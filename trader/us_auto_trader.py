@@ -362,6 +362,30 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
         _signal_id   = trade.signal_id
         _code        = trade.code
         _created_at  = trade.created_at
+        # FAILED 30분 쿨다운 (알람 폭탄 방지)
+        from datetime import timedelta as _tdelta
+        _recent_failed = (await db.execute(
+            select(Trade).where(and_(
+                Trade.code == _code,
+                Trade.order_type == "SELL",
+                Trade.status == "FAILED",
+                Trade.created_at >= datetime.utcnow() - _tdelta(minutes=30),
+            ))
+        )).scalars().first()
+        if _recent_failed:
+            logger.debug(f"[US] {_code} 매도 FAILED 쿨다운 중 — 스킵")
+            continue
+        # KIS 실제 보유수량으로 보정
+        try:
+            _us_bal = await get_us_balance()
+            for _h in _us_bal.get("data", {}).get("holdings", []):
+                if _h.get("symbol") == _code:
+                    _kis_qty = _h.get("quantity", 0)
+                    if _kis_qty > 0:
+                        _open_qty = _kis_qty
+                    break
+        except Exception:
+            pass
 
         cfg = US_ETF_CONFIG.get(trade.code)
         if not cfg:
