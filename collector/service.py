@@ -43,7 +43,31 @@ async def sync_stock_master(db: AsyncSession):
     records = []
     for market, fdr_key in [("KOSPI", "KOSPI"), ("KOSDAQ", "KOSDAQ")]:
         try:
-            df = fdr.StockListing(fdr_key)
+            df = None
+            # FDR GitHub 캐시 404 대비 - 최근 7 거래일 순차 시도
+            import requests as _req, json as _json
+            from datetime import datetime as _dt, timedelta as _td
+            try:
+                _r = _req.get(
+                    'http://data.krx.co.kr/comm/bldAttendant/executeForResourceBundle.cmd?baseName=krx.mdc.i18n.component&key=B128.bld',
+                    headers={'User-Agent': 'Mozilla/5.0'}, timeout=5
+                )
+                _date_str = _json.loads(_r.text)['result']['output'][0]['max_work_dt']
+                _base = _dt.strptime(_date_str, '%Y%m%d')
+            except Exception:
+                _base = _dt.now()
+            for _d in range(0, 10):
+                _ds = (_base - _td(days=_d)).strftime('%Y-%m-%d')
+                _url = f'https://raw.githubusercontent.com/FinanceData/fdr_krx_data_cache/refs/heads/master/data/listing/krx/{_ds}.csv'
+                try:
+                    import pandas as _pd
+                    _df = _pd.read_csv(_url, index_col=0, dtype={'Code': str})
+                    _mkt = {'KOSPI': 'STK', 'KOSDAQ': 'KSQ'}.get(fdr_key, 'STK')
+                    df = _df[_df['MarketId'] == _mkt].reset_index(drop=True) if 'MarketId' in _df.columns else _df
+                    logger.info(f"종목 마스터 [{market}] 캐시 날짜: {_ds}")
+                    break
+                except Exception:
+                    continue
             if df is None or df.empty:
                 continue
             code_col = next((c for c in df.columns if c in ["Code", "Symbol", "종목코드", "ISU_SRT_CD"]), None)
