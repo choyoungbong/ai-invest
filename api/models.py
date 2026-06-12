@@ -122,6 +122,7 @@ class Trade(Base):
     broker_order_id  = Column(String(100))
     notes            = Column(String(500))
     is_simulation    = Column(Boolean, default=True)
+    is_manual        = Column(Boolean, default=False)  # 수동매수 여부 (True면 자동 손절/익절 제외)
     created_at       = Column(DateTime, server_default=func.now())
     filled_at        = Column(DateTime)
 

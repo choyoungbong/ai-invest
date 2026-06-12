@@ -9,6 +9,7 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 
+from pydantic import BaseModel
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -261,6 +262,150 @@ async def weekly_report(db: AsyncSession = Depends(get_db)):
 async def monthly_report(db: AsyncSession = Depends(get_db)):
     return await get_monthly_stats(db)
 
+
+
+# ── 수동매수 관리 ─────────────────────────────────────────────────────────────
+class ManualBuyRequest(BaseModel):
+    code: str
+    name: str
+    quantity: int
+    price: float
+
+@app.post("/trade/manual-buy", tags=["Trade"])
+async def register_manual_buy(
+    req: ManualBuyRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """수동매수 종목을 DB에 등록 (자동 손절/익절 제외)"""
+    signal_id = str(uuid.uuid4())
+    trade_id  = str(uuid.uuid4())
+    await db.execute(Trade.__table__.insert().values(
+        id=trade_id,
+        signal_id=signal_id,
+        code=req.code,
+        name=req.name,
+        order_type="BUY",
+        price=req.price,
+        order_price=req.price,
+        quantity=req.quantity,
+        order_quantity=req.quantity,
+        amount=req.price * req.quantity,
+        status="FILLED",
+        is_simulation=False,
+        is_manual=True,
+    ))
+    await db.commit()
+    await send_message(
+        f"📝 <b>[수동매수 등록]</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📌 종목: <b>{req.name} ({req.code})</b>\n"
+        f"💰 매수가: {req.price:,.0f}원 × {req.quantity}주\n"
+        f"💵 금액: {req.price * req.quantity:,.0f}원\n"
+        f"⚙️ 자동 손절/익절 제외 (수동 관리)"
+    )
+    return {"message": "수동매수 등록 완료", "signal_id": signal_id, "trade_id": trade_id}
+
+@app.get("/trade/manual-positions", tags=["Trade"])
+async def get_manual_positions(db: AsyncSession = Depends(get_db)):
+    """현재 수동매수 포지션 목록 조회"""
+    sold_sids = set((await db.execute(
+        select(Trade.signal_id).where(and_(
+            Trade.order_type == "SELL",
+            Trade.status.in_(["FILLED", "CLOSED"]),
+        )).distinct()
+    )).scalars().all())
+
+    buys = (await db.execute(
+        select(Trade).where(and_(
+            Trade.order_type == "BUY",
+            Trade.status == "FILLED",
+            Trade.is_manual == True,  # noqa: E712
+        ))
+    )).scalars().all()
+
+    positions = []
+    for t in buys:
+        if t.signal_id in sold_sids:
+            continue
+        try:
+            price_data    = await kis.get_current_price(t.code)
+            current_price = price_data["price"]
+            pnl_pct       = (current_price - t.price) / t.price * 100
+        except Exception:
+            current_price = 0
+            pnl_pct       = 0
+        positions.append({
+            "signal_id":     t.signal_id,
+            "trade_id":      t.id,
+            "code":          t.code,
+            "name":          t.name,
+            "quantity":      t.quantity,
+            "avg_price":     t.price,
+            "current_price": current_price,
+            "pnl_pct":       round(pnl_pct, 2),
+            "amount":        t.amount,
+            "created_at":    t.created_at.isoformat() if t.created_at else None,
+        })
+    return {"count": len(positions), "positions": positions}
+
+@app.post("/trade/manual-sell", tags=["Trade"])
+async def manual_sell(
+    signal_id: str = Query(..., description="수동매수 등록 시 반환된 signal_id"),
+    db: AsyncSession = Depends(get_db),
+):
+    """수동매수 종목 수동 매도 (DB 기록)"""
+    buy = (await db.execute(
+        select(Trade).where(and_(
+            Trade.signal_id == signal_id,
+            Trade.order_type == "BUY",
+            Trade.status == "FILLED",
+            Trade.is_manual == True,  # noqa: E712
+        ))
+    )).scalars().first()
+    if not buy:
+        return {"error": "수동매수 포지션을 찾을 수 없습니다"}
+
+    price_data    = await kis.get_current_price(buy.code)
+    current_price = price_data["price"]
+    result        = await kis.sell_order(buy.code, buy.quantity, order_type="01")
+    status        = "FILLED" if result["success"] else "FAILED"
+    pnl           = (current_price - buy.price) * buy.quantity
+
+    await db.execute(Trade.__table__.insert().values(
+        id=str(uuid.uuid4()),
+        signal_id=signal_id,
+        code=buy.code,
+        name=buy.name,
+        order_type="SELL",
+        price=current_price,
+        order_price=current_price,
+        quantity=buy.quantity,
+        order_quantity=buy.quantity,
+        amount=current_price * buy.quantity,
+        status=status,
+        broker_order_id=result.get("order_no", ""),
+        is_simulation=False,
+        is_manual=True,
+        real_profit=pnl,
+    ))
+    await db.commit()
+    emoji = "✅" if pnl >= 0 else "🔴"
+    await send_message(
+        f"{emoji} <b>[수동매도 완료]</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📌 종목: <b>{buy.name} ({buy.code})</b>\n"
+        f"💰 매도가: {current_price:,.0f}원 × {buy.quantity}주\n"
+        f"{'📈' if pnl >= 0 else '📉'} 손익: {pnl:+,.0f}원"
+    )
+    return {
+        "message": "수동매도 완료",
+        "code": buy.code,
+        "name": buy.name,
+        "sell_price": current_price,
+        "quantity": buy.quantity,
+        "pnl": pnl,
+        "status": status,
+    }
 
 @app.post("/trade/close-expired", tags=["Trade"])
 async def close_expired(db: AsyncSession = Depends(get_db)):

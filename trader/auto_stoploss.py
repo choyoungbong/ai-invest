@@ -322,12 +322,12 @@ async def check_and_execute_auto_exit(db: AsyncSession) -> list[dict]:
         else:
             logger.warning(f"[재시도] 재주문 실패: {row.code}")
 
-
-    # 미청산 BUY signal_id 조회
+    # 미청산 BUY signal_id 조회 (수동매수 제외)
     signal_ids_q = (await db.execute(
         select(Trade.signal_id).where(and_(
             Trade.order_type == "BUY",
             Trade.status == "FILLED",
+            Trade.is_manual == False,  # noqa: E712 — 수동매수는 자동 손절/익절 제외
         )).distinct()
     )).scalars().all()
 
