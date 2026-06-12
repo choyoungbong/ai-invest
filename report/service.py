@@ -160,3 +160,94 @@ async def get_monthly_stats(db: AsyncSession) -> dict:
     start = end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     return await calc_pnl(db, start, end)
+
+
+async def send_morning_report(db: AsyncSession):
+    """아침 9:00 현황 보고 - 국내+미국 포지션 + 레짐"""
+    import urllib.request, json as _json
+    from trader.market_regime import get_market_regime
+
+    def fetch(url):
+        try:
+            with urllib.request.urlopen(url, timeout=3) as r:
+                return _json.loads(r.read())
+        except:
+            return None
+
+    kr   = fetch("http://localhost:8000/trade/balance")
+    us   = fetch("http://localhost:8000/us-trading/balance")
+    risk = fetch("http://localhost:8000/risk/status")
+    regime, breadth = await get_market_regime(db)
+
+    lines = [
+        "🌅 <b>[AI INVEST] 장 시작 현황</b>",
+        f"━━━━━━━━━━━━━━━━━━",
+        f"📊 시장 레짐: {'🟢 BULL' if regime=='bull' else '🔴 BEAR' if regime=='bear' else '🟡 NEUTRAL'} ({breadth:.1%})",
+    ]
+
+    # 국내
+    if kr:
+        hs = kr.get("holdings", [])
+        total_pnl = sum(h.get("profit_loss", 0) for h in hs)
+        lines.append(f"━━━━━━━━━━━━━━━━━━")
+        lines.append(f"🇰🇷 국내: {len(hs)}종목 / 예수금 {kr.get('available_cash',0):,}원")
+        for h in hs:
+            e = "🟢" if h.get("profit_loss",0) >= 0 else "🔴"
+            lines.append(f"  {e} {h['name']} {h['profit_pct']:+.2f}% ({h.get('profit_loss',0):+,}원)")
+        if hs:
+            lines.append(f"  미실현: {total_pnl:+,}원")
+
+    # 미국
+    if us and us.get("success"):
+        d = us["data"]
+        hs = d.get("holdings", [])
+        us_pnl = sum((h["current_price"]-h["avg_price"])*h["quantity"] for h in hs)
+        lines.append(f"━━━━━━━━━━━━━━━━━━")
+        lines.append(f"🇺🇸 미국: {len(hs)}종목 / ${d.get('cash_usd',0):.2f}")
+        for h in hs:
+            e = "🟢" if h.get("pnl_pct",0) >= 0 else "🔴"
+            lines.append(f"  {e} {h['symbol']} {h['pnl_pct']:+.2f}%")
+        if hs:
+            lines.append(f"  미실현: ${us_pnl:+.2f}")
+
+    if risk:
+        lines.append(f"━━━━━━━━━━━━━━━━━━")
+        lines.append(f"💰 어제 손익: {risk.get('today_pnl',0):+,}원")
+
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    await send_message("\n".join(lines))
+    logger.info("아침 현황 보고 발송 완료")
+
+
+async def send_us_close_report(db: AsyncSession):
+    """미국장 마감 후 05:10 보고"""
+    import urllib.request, json as _json
+
+    def fetch(url):
+        try:
+            with urllib.request.urlopen(url, timeout=3) as r:
+                return _json.loads(r.read())
+        except:
+            return None
+
+    us = fetch("http://localhost:8000/us-trading/balance")
+    lines = ["🌙 <b>[AI INVEST] 미국장 마감</b>", "━━━━━━━━━━━━━━━━━━"]
+
+    if us and us.get("success"):
+        d = us["data"]
+        hs = d.get("holdings", [])
+        us_pnl = sum((h["current_price"]-h["avg_price"])*h["quantity"] for h in hs)
+        lines.append(f"💵 총자산: ${d.get('total_usd',0):.2f} | 예수금: ${d.get('cash_usd',0):.2f}")
+        lines.append(f"📦 보유: {len(hs)}종목")
+        for h in hs:
+            e = "🟢" if h.get("pnl_pct",0) >= 0 else "🔴"
+            pnl = (h["current_price"]-h["avg_price"])*h["quantity"]
+            lines.append(f"  {e} {h['symbol']} {h['pnl_pct']:+.2f}% (${pnl:+.2f})")
+        lines.append(f"━━━━━━━━━━━━━━━━━━")
+        lines.append(f"미실현 합계: ${us_pnl:+.2f}")
+    else:
+        lines.append("⚠️ 미국 잔고 조회 실패")
+
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    await send_message("\n".join(lines))
+    logger.info("미국장 마감 보고 발송 완료")

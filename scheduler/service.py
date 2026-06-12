@@ -507,6 +507,36 @@ def create_scheduler() -> AsyncIOScheduler:
     # )
 
     # ── 15:40 일일 리포트 ────────────────────────────────────────────────────
+    # ── 아침 9:00 현황 보고 ─────────────────────────────────────────────────
+    async def job_morning_report():
+        try:
+            from report.service import send_morning_report
+            async with AsyncSessionLocal() as db:
+                await send_morning_report(db)
+        except Exception as e:
+            logger.error(f"[스케줄러] 아침 보고 오류: {e}")
+
+    scheduler.add_job(
+        job_morning_report,
+        CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone=KST),
+        id="morning_report", name="아침 현황 보고",
+    )
+
+    # ── 미국장 마감 05:10 보고 ───────────────────────────────────────────────
+    async def job_us_close_report():
+        try:
+            from report.service import send_us_close_report
+            async with AsyncSessionLocal() as db:
+                await send_us_close_report(db)
+        except Exception as e:
+            logger.error(f"[스케줄러] 미국장 마감 보고 오류: {e}")
+
+    scheduler.add_job(
+        job_us_close_report,
+        CronTrigger(hour=5, minute=10, day_of_week="tue-sat", timezone=KST),
+        id="us_close_report", name="미국장 마감 보고",
+    )
+
     scheduler.add_job(
         job_daily_report,
         CronTrigger(hour=15, minute=40, day_of_week="mon-fri", timezone=KST),

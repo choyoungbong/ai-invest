@@ -487,7 +487,8 @@ async def check_us_positions(db: AsyncSession) -> list[dict]:
         )
         await db.commit()
 
-        record_trade_result(trade.code, pnl_usd)
+        if status == 'FILLED':  # FAILED는 손절 카운터 미반영
+            record_trade_result(trade.code, pnl_usd)
 
         executed.append({
             "symbol":  trade.code,
