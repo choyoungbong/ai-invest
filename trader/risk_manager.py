@@ -602,6 +602,8 @@ async def sync_positions_with_kis(db: AsyncSession) -> dict:
                         amount=avg_price * quantity,
                         phase=1,
                         filled_at=datetime.utcnow(),
+                        is_manual=True,
+                        is_simulation=False,
                         notes="수동매수 자동감지 — KIS 잔고 기준 DB 삽입",
                     )
                 )
