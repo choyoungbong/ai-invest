@@ -9,12 +9,12 @@ from datetime import datetime, timezone, timedelta
 KST_TZ = timezone(timedelta(hours=9))
 kst_now = datetime.now(KST_TZ).strftime('%Y-%m-%d %H:%M:%S')
 today_str = datetime.now(KST_TZ).strftime('%Y-%m-%d')
-PSQL = ["docker","compose","-f","/home/choyoungbong7/ai-invest/docker-compose.yml",
+PSQL = ["docker-compose","-f","/home/choyoungbong7/ai-invest/docker-compose.yml",
         "exec","-T","postgres","psql","-U","aiinvest","-d","aiinvest","-t","-A","-F","\t"]
 
 def fetch(path):
     try:
-        with urllib.request.urlopen(f"http://localhost:8000{path}", timeout=5) as r:
+        with urllib.request.urlopen(f"http://localhost:8000{path}", timeout=15) as r:
             return json.loads(r.read())
     except: return None
 
@@ -46,14 +46,15 @@ for r in db("SELECT code, MIN(created_at) FROM trades WHERE order_type='BUY' AND
             hdays[r[0]] = (now_utc - dt).days
         except: pass
 
-# 실현 손익 (완전 청산 종목만)
+# 실현 손익 (SELL 체결 기준 - 부분 청산 포함)
 real_rows = db("""
-    SELECT code, ROUND(SUM(CASE WHEN order_type='SELL' THEN price*quantity
-                              ELSE -(price*quantity) END)::numeric) as pnl
-    FROM trades WHERE status='FILLED'
+    SELECT code, ROUND(SUM(real_profit)::numeric) as pnl
+    FROM trades
+    WHERE order_type='SELL'
+      AND status IN ('FILLED','CLOSED')
+      AND real_profit IS NOT NULL
+      
     GROUP BY code
-    HAVING SUM(CASE WHEN order_type='SELL' THEN quantity ELSE -quantity END)=0
-       AND COUNT(CASE WHEN order_type='SELL' THEN 1 END)>0
     ORDER BY 2 DESC
 """)
 total_realized = sum(float(r[1]) for r in real_rows if len(r)==2)
@@ -147,7 +148,7 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  📋 오늘 거래 내역 [$TODAY]"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-docker compose -f ~/ai-invest/docker-compose.yml exec -T postgres \
+docker-compose -f ~/ai-invest/docker-compose.yml exec -T postgres \
   psql -U aiinvest -d aiinvest -c "
 SELECT to_char(created_at AT TIME ZONE 'Asia/Seoul','HH24:MI') AS 시간,
        code AS 종목, order_type AS 구분, status AS 상태,
@@ -162,7 +163,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "  📡 오늘 주요 이벤트"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 # DB 기반 이벤트 (재빌드/재시작에 영향 없음)
-docker compose -f ~/ai-invest/docker-compose.yml exec -T postgres \
+docker-compose -f ~/ai-invest/docker-compose.yml exec -T postgres \
   psql -U aiinvest -d aiinvest -c "
 SELECT to_char(created_at AT TIME ZONE 'Asia/Seoul','HH24:MI') AS 시간,
        strategy AS 전략,

@@ -200,28 +200,28 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
-
-  # ── Next.js Dashboard ──────────────────────────────────────────────────────
-  dashboard:
-    build:
-      context: ./dashboard
-      dockerfile: Dockerfile
-      args:
-        # ✅ IP 하드코딩 제거 → 환경변수로 관리 (IP 변경 시 재빌드 불필요)
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
-    container_name: aiinvest-dashboard
-    restart: unless-stopped
-    environment:
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
-    ports:
-      - "3000:3000"
-    depends_on:
-      - api
-    logging:                         # ✅ 로그 rotation 추가
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
+# 
+#   # ── Next.js Dashboard ──────────────────────────────────────────────────────
+#   dashboard:
+#     build:
+#       context: ./dashboard
+#       dockerfile: Dockerfile
+#       args:
+#         # ✅ IP 하드코딩 제거 → 환경변수로 관리 (IP 변경 시 재빌드 불필요)
+#         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+#     container_name: aiinvest-dashboard
+#     restart: unless-stopped
+#     environment:
+#       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+#     ports:
+#       - "3000:3000"
+#     depends_on:
+#       - api
+#     logging:                         # ✅ 로그 rotation 추가
+#       driver: json-file
+#       options:
+#         max-size: "20m"
+#         max-file: "3"
 
 volumes:
   postgres_data:
