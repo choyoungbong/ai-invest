@@ -423,30 +423,11 @@ def create_scheduler() -> AsyncIOScheduler:
         }
     )
 
-    # 08:50 종목 마스터 동기화
-    scheduler.add_job(
-        job_sync_master,
-        CronTrigger(hour=8, minute=50, timezone=KST),
-        id="sync_master", name="종목 마스터 동기화",
-    )
 
-    # ── 풀 실행: 하루 7회 (수집 + 전략 + 매수) ──────────────────────────────
-    for hour, minute in [(9, 5), (10, 0), (11, 0), (12, 0), (13, 0), (14, 0), (15, 10)]:
-        scheduler.add_job(
-            job_collect_and_run,
-            CronTrigger(hour=hour, minute=minute, day_of_week="mon-fri", timezone=KST),
-            id=f"run_{hour:02d}{minute:02d}",
-            name=f"{hour:02d}:{minute:02d} 풀 실행",
-        )
 
-    # ── 빠른 스캔: 하루 6회 (수집 없이 전략 + 매수) ─────────────────────────
-    for hour, minute in [(9,20),(9,40),(10,20),(10,40),(11,20),(11,40),(12,20),(12,40),(13,20),(13,40),(14,20),(14,40),(15,0)]:
-        scheduler.add_job(
-            job_scan_only,
-            CronTrigger(hour=hour, minute=minute, day_of_week="mon-fri", timezone=KST),
-            id=f"scan_{hour:02d}{minute:02d}",
-            name=f"{hour:02d}:{minute:02d} 빠른 스캔",
-        )
+
+
+
 
     # ── 포지션 싱크: 장 시작 / 장 종료 ─────────────────────────────────────
     scheduler.add_job(
@@ -480,15 +461,7 @@ def create_scheduler() -> AsyncIOScheduler:
         coalesce=True,
     )
 
-    # ── 2차 분할매수 체크: 10분마다 ─────────────────────────────────────────
-    scheduler.add_job(
-        job_phase2_check,
-        CronTrigger(hour="9-15", minute="*/10", day_of_week="mon-fri", timezone=KST),
-        id="phase2_check",
-        name="2차 분할매수 체크 (10분)",
-        max_instances=1,
-        coalesce=True,
-    )
+
 
     # ── 15:10 조건부 청산 (수동매도 전략으로 비활성화) ──────────────────────
     # scheduler.add_job(
@@ -531,11 +504,7 @@ def create_scheduler() -> AsyncIOScheduler:
         except Exception as e:
             logger.error(f"[스케줄러] 미국장 마감 보고 오류: {e}")
 
-    scheduler.add_job(
-        job_us_close_report,
-        CronTrigger(hour=5, minute=10, day_of_week="tue-sat", timezone=KST),
-        id="us_close_report", name="미국장 마감 보고",
-    )
+
 
     scheduler.add_job(
         job_daily_report,
@@ -543,12 +512,7 @@ def create_scheduler() -> AsyncIOScheduler:
         id="daily_report", name="일일 리포트",
     )
 
-    # ── 매주 금요일 16:00 주간 리포트 ───────────────────────────────────────
-    scheduler.add_job(
-        job_weekly_report,
-        CronTrigger(hour=16, minute=0, day_of_week="fri", timezone=KST),
-        id="weekly_report", name="주간 리포트",
-    )
+
 
     # ── 매시 정각 헬스체크 ───────────────────────────────────────────────────
     async def job_health():
@@ -568,56 +532,7 @@ def create_scheduler() -> AsyncIOScheduler:
         id="health_check", name="헬스체크",
     )
 
-    # ── 🇺🇸 미국 ETF 자동매매 스케줄 ────────────────────────────────────────
-    # US_TRADING_ENABLED=false(기본값)이면 각 job 내부에서 즉시 return — 안전
-    # .env에서 US_TRADING_ENABLED=true 로 변경 시 활성화
 
-    # 22:30 개장 직전: 비대상 종목 청산 + 당일 기준 총자산 기록
-    scheduler.add_job(
-        job_us_market_open,
-        CronTrigger(hour=22, minute=30, day_of_week="mon-fri", timezone=KST),
-        id="us_market_open",
-        name="🇺🇸 미국장 개장 (청산+시작)",
-    )
-
-    # 22:35 ~ 04:35: 30분 신호 스캔 (정각+5분, 정각+35분)
-    for h, m in [
-        (22, 35), (23, 5), (23, 35),
-        (0,  5),  (0, 35), (1,  5),  (1, 35),
-        (2,  5),  (2, 35), (3,  5),  (3, 35),
-        (4,  5),  (4, 35),
-    ]:
-        scheduler.add_job(
-            job_us_scan,
-            CronTrigger(hour=h, minute=m, day_of_week="mon-sat", timezone=KST),
-            id=f"us_scan_{h:02d}{m:02d}",
-            name=f"🇺🇸 {h:02d}:{m:02d} 미국 스캔",
-        )
-
-    # 손절/익절 체크: 야간 5분마다 (22:35~23:55)
-    scheduler.add_job(
-        job_us_position_check,
-        CronTrigger(hour="22-23", minute="*/5",
-                    day_of_week="mon-fri", timezone=KST),
-        id="us_pos_night", name="🇺🇸 미국 포지션 체크 (야간)",
-        max_instances=1, coalesce=True,
-    )
-    # 손절/익절 체크: 새벽 5분마다 (00:00~04:50)
-    scheduler.add_job(
-        job_us_position_check,
-        CronTrigger(hour="0-4", minute="*/5",
-                    day_of_week="tue-sat", timezone=KST),
-        id="us_pos_dawn", name="🇺🇸 미국 포지션 체크 (새벽)",
-        max_instances=1, coalesce=True,
-    )
-
-    # 04:55: 미국장 마감 + 일일 결과
-    scheduler.add_job(
-        job_us_market_close,
-        CronTrigger(hour=4, minute=55, day_of_week="tue-sat", timezone=KST),
-        id="us_market_close",
-        name="🇺🇸 미국장 마감",
-    )
     return scheduler
 
 
