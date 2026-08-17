@@ -429,40 +429,28 @@ def create_scheduler() -> AsyncIOScheduler:
 
 
 
-    # ── 포지션 싱크: 장 시작 / 장 종료 ─────────────────────────────────────
+    # ── 포지션 싱크: 장 시작 / 장 종료 (하루 2회) ───────────────────────────
     scheduler.add_job(
         job_sync_positions,
-        CronTrigger(hour=9, minute=5, timezone=KST),
+        CronTrigger(hour=9, minute=5, day_of_week="mon-fri", timezone=KST),
         id="sync_positions_open", name="포지션 싱크 (장 시작)",
     )
     scheduler.add_job(
         job_sync_positions,
-        CronTrigger(hour=15, minute=25, timezone=KST),
+        CronTrigger(hour=15, minute=25, day_of_week="mon-fri", timezone=KST),
         id="sync_positions_close", name="포지션 싱크 (장 종료)",
     )
-    # ── 포지션 싱크: 장 중 15분마다 ────────────────────────────────────────
-    scheduler.add_job(
-        job_sync_positions,
-        CronTrigger(hour="9-15", minute="*/15", day_of_week="mon-fri", timezone=KST),
-        id="sync_positions_intraday",
-        name="포지션 싱크 (장 중 15분)",
-        max_instances=1,
-        coalesce=True,
-    )
-
-
-    # ── 손절/익절/트레일링 체크: 5분마다 ────────────────────────────────────
+    # ── 손절/트레일링 체크: 장 시작 / 장 종료 (하루 2회) ────────────────────
     scheduler.add_job(
         job_stop_loss_check,
-        CronTrigger(hour="9-15", minute="*/5", day_of_week="mon-fri", timezone=KST),
-        id="stop_loss_check",
-        name="손절/익절 체크 (5분)",
-        max_instances=1,
-        coalesce=True,
+        CronTrigger(hour=9, minute=10, day_of_week="mon-fri", timezone=KST),
+        id="stop_loss_open", name="손절/익절 체크 (장 시작)",
     )
-
-
-
+    scheduler.add_job(
+        job_stop_loss_check,
+        CronTrigger(hour=15, minute=20, day_of_week="mon-fri", timezone=KST),
+        id="stop_loss_close", name="손절/익절 체크 (장 종료)",
+    )
     # ── 15:10 조건부 청산 (수동매도 전략으로 비활성화) ──────────────────────
     # scheduler.add_job(
     #     job_conditional_sell_eod,
@@ -491,7 +479,7 @@ def create_scheduler() -> AsyncIOScheduler:
 
     scheduler.add_job(
         job_morning_report,
-        CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone=KST),
+        CronTrigger(hour=9, minute=5, day_of_week="mon-fri", timezone=KST),
         id="morning_report", name="아침 현황 보고",
     )
 
@@ -528,7 +516,7 @@ def create_scheduler() -> AsyncIOScheduler:
 
     scheduler.add_job(
         job_health,
-        CronTrigger(minute=0, timezone=KST),
+        CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone=KST),
         id="health_check", name="헬스체크",
     )
 
